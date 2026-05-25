@@ -37,6 +37,13 @@ import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
 
+/** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 /** Payload of `SESSION_THREAD_READY` emitted by core after a session+thread is created. */
 export interface SessionThreadReadyPayload {
   sessionId: string;
@@ -202,6 +209,12 @@ export class SlackAdapter extends MessagingAdapter {
   private _pendingChannelsBySlug = new Map<string, SlackSessionMeta>();
   private _threadReadyHandler?: (payload: SessionThreadReadyPayload) => void;
   private _configChangedHandler?: (payload: { sessionId: string }) => void;
+  private _promptWaitingHandler?: (payload: { sessionId: string; sourceAdapterId?: string }) => void;
+  private _messageProcessingHandler?: (payload: { sessionId: string; sourceAdapterId?: string }) => void;
+  /** Message `ts` of the latest usage line per session, for in-place edits */
+  private _lastUsageTs = new Map<string, string>();
+  /** Message `ts` of the latest "queued" notice per session, deleted when processing starts */
+  private _waitingNoticeTs = new Map<string, string>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -495,6 +508,27 @@ export class SlackAdapter extends MessagingAdapter {
     };
     this.core.eventBus?.on("session:configChanged", this._configChangedHandler);
 
+    // Surface queue depth so users know their message is waiting behind an
+    // active prompt instead of being silently buffered. Telegram does this
+    // with interactive buttons (process now / clear / cancel / flush);
+    // without that UX in Slack, we post a passive notice and delete it
+    // when MESSAGE_PROCESSING fires.
+    this._promptWaitingHandler = (data) => {
+      if (data.sourceAdapterId && data.sourceAdapterId !== "slack") return;
+      const queueDepth = (data as { queueDepth?: number }).queueDepth ?? 1;
+      this.postWaitingNotice(data.sessionId, queueDepth).catch((err) =>
+        this.log.warn({ err, sessionId: data.sessionId }, "Failed to post waiting notice"),
+      );
+    };
+    this.core.eventBus?.on("prompt:waiting", this._promptWaitingHandler);
+
+    this._messageProcessingHandler = (data) => {
+      this.dismissWaitingNotice(data.sessionId).catch((err) =>
+        this.log.warn({ err, sessionId: data.sessionId }, "Failed to dismiss waiting notice"),
+      );
+    };
+    this.core.eventBus?.on("message:processing", this._messageProcessingHandler);
+
     // Start Bolt (Socket Mode)
     await this.app.start();
     this.log.info("Slack adapter started (Socket Mode)");
@@ -629,6 +663,14 @@ export class SlackAdapter extends MessagingAdapter {
       this.core.eventBus?.off("session:configChanged", this._configChangedHandler);
       this._configChangedHandler = undefined;
     }
+    if (this._promptWaitingHandler) {
+      this.core.eventBus?.off("prompt:waiting", this._promptWaitingHandler);
+      this._promptWaitingHandler = undefined;
+    }
+    if (this._messageProcessingHandler) {
+      this.core.eventBus?.off("message:processing", this._messageProcessingHandler);
+      this._messageProcessingHandler = undefined;
+    }
     // Cleanup all activity trackers
     for (const [sessionId, tracker] of this.sessionTrackers) {
       try {
@@ -659,6 +701,7 @@ export class SlackAdapter extends MessagingAdapter {
   // --- MessagingAdapter implementations ---
 
   async createSessionThread(sessionId: string, name: string): Promise<string> {
+    if (sessionId) this.getTracer(sessionId)?.log("slack", { action: "thread:create", sessionId, name });
     const meta = await this.channelManager.createChannel(sessionId, name);
 
     if (sessionId) {
@@ -708,6 +751,7 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async deleteSessionThread(sessionId: string): Promise<void> {
+    this.getTracer(sessionId)?.log("slack", { action: "thread:delete", sessionId });
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
 
@@ -730,6 +774,8 @@ export class SlackAdapter extends MessagingAdapter {
     this._dispatchQueues.delete(sessionId);
     this._skillCommandsTs.delete(sessionId);
     this._pendingSkillCommands.delete(sessionId);
+    this._lastUsageTs.delete(sessionId);
+    this._waitingNoticeTs.delete(sessionId);
   }
 
   /**
@@ -811,6 +857,16 @@ export class SlackAdapter extends MessagingAdapter {
       }
       return true; // handled (with error) — don't forward to agent
     }
+  }
+
+  /**
+   * Return the agent's debugTracer for this session, if one exists.
+   * Bug reports include per-event traces when the user enables debug mode;
+   * without this hook, Slack-side dispatch is invisible to that audit trail.
+   */
+  private getTracer(sessionId: string): { log(adapter: string, payload: Record<string, unknown>): void } | null {
+    const session = this.core.sessionManager.getSession(sessionId) as unknown as { agentInstance?: { debugTracer?: { log(a: string, p: Record<string, unknown>): void } } } | undefined;
+    return session?.agentInstance?.debugTracer ?? null;
   }
 
   private getSessionMeta(sessionId: string): SlackSessionMeta | undefined {
@@ -902,6 +958,7 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
+    this.getTracer(sessionId)?.log("slack", { action: "dispatch:enter", sessionId, type: content.type });
     if (!this.sessions.has(sessionId)) {
       // On restart, this.sessions is cleared. Lazy resume does not call
       // createSessionThread(), so we self-heal by restoring from the persisted record.
@@ -909,6 +966,7 @@ export class SlackAdapter extends MessagingAdapter {
 
       if (!this.sessions.has(sessionId)) {
         this.log.warn({ sessionId }, "No Slack channel for session, skipping message");
+        this.getTracer(sessionId)?.log("slack", { action: "dispatch:dropped", sessionId, reason: "no-channel" });
         return;
       }
     }
@@ -925,6 +983,7 @@ export class SlackAdapter extends MessagingAdapter {
   // --- Handler overrides (dispatched by base class) ---
 
   protected async handleText(sessionId: string, content: OutgoingMessage): Promise<void> {
+    this.getTracer(sessionId)?.log("slack", { action: "handle:text", sessionId, len: content.text?.length ?? 0 });
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
 
@@ -938,6 +997,7 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleSessionEnd(sessionId: string, content: OutgoingMessage): Promise<void> {
+    this.getTracer(sessionId)?.log("slack", { action: "handle:sessionEnd", sessionId });
     // Cleanup tracker
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) {
@@ -1033,6 +1093,8 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   protected async handleToolCall(sessionId: string, content: OutgoingMessage, _verbosity: DisplayVerbosity): Promise<void> {
+    const m = (content.metadata ?? {}) as Partial<ToolCallMeta>;
+    this.getTracer(sessionId)?.log("slack", { action: "handle:toolCall", sessionId, toolId: m.id, toolName: m.name, kind: m.kind, status: m.status });
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
     const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
@@ -1044,7 +1106,6 @@ export class SlackAdapter extends MessagingAdapter {
     // Ensure turn exists
     if (!tracker.getTurn()) await tracker.onNewPrompt();
 
-    const m = (content.metadata ?? {}) as Partial<ToolCallMeta>;
     await tracker.onToolCall(
       { id: m.id ?? "", name: m.name ?? "unknown", kind: m.kind, status: m.status, rawInput: m.rawInput, viewerLinks: m.viewerLinks },
       String(m.kind ?? ""),
@@ -1083,11 +1144,41 @@ export class SlackAdapter extends MessagingAdapter {
     if (!meta) return;
     const tracker = this.getOrCreateTracker(sessionId, meta.channelId);
     const m = content.metadata as any;
-    await tracker.onUsage({
-      tokensUsed: m?.tokensUsed ?? m?.tokens,
-      contextSize: m?.contextSize,
-      cost: m?.cost,
-    });
+    const tokens = m?.tokensUsed ?? m?.tokens;
+    const contextSize = m?.contextSize;
+    const cost = m?.cost;
+    await tracker.onUsage({ tokensUsed: tokens, contextSize, cost });
+
+    // In-thread usage line: post once per turn, edit subsequent updates in
+    // place. Telegram does the same via formatUsage / message replace pattern.
+    const parts: string[] = [];
+    if (typeof tokens === "number") parts.push(`*${formatTokens(tokens)}* tokens`);
+    if (typeof contextSize === "number") parts.push(`ctx \`${formatTokens(contextSize)}\``);
+    if (typeof cost === "number") parts.push(`$${cost.toFixed(4)}`);
+    if (parts.length > 0) {
+      const text = `📊 ${parts.join(" · ")}`;
+      const existingTs = this._lastUsageTs.get(sessionId);
+      try {
+        if (existingTs) {
+          await this.queue.enqueue("chat.update", {
+            channel: meta.channelId,
+            ts: existingTs,
+            text,
+          });
+        } else {
+          const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
+            channel: meta.channelId,
+            text,
+          });
+          if (result?.ts) this._lastUsageTs.set(sessionId, result.ts);
+        }
+      } catch (err) {
+        // If edit fails (message gone), clear the cached ts so the next event
+        // posts a fresh one instead of looping on the same failure.
+        this._lastUsageTs.delete(sessionId);
+        this.log.warn({ err, sessionId }, "Failed to post/update usage line");
+      }
+    }
 
     // Post inline completion notification with direct channel link
     if (this.slackConfig.notificationChannelId) {
@@ -1162,6 +1253,45 @@ export class SlackAdapter extends MessagingAdapter {
     });
   }
 
+  /**
+   * Post a "message queued" notice when a prompt is enqueued behind an
+   * active one. Stash the ts so we can delete it when MESSAGE_PROCESSING
+   * fires for the same session. Best-effort.
+   */
+  private async postWaitingNotice(sessionId: string, position: number): Promise<void> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    // If we already posted a notice for an earlier queued message, leave it
+    // — the new one would just duplicate the same UX.
+    if (this._waitingNoticeTs.has(sessionId)) return;
+
+    const text = `📋 Message queued (#${position} in line). Agent is processing the previous prompt.`;
+    const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
+      channel: meta.channelId,
+      text,
+    });
+    if (result?.ts) this._waitingNoticeTs.set(sessionId, result.ts);
+  }
+
+  /**
+   * Delete the "queued" notice once the queued message starts processing.
+   * Telegram does the same via deleteMessage on MESSAGE_PROCESSING.
+   */
+  private async dismissWaitingNotice(sessionId: string): Promise<void> {
+    const ts = this._waitingNoticeTs.get(sessionId);
+    if (!ts) return;
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      this._waitingNoticeTs.delete(sessionId);
+      return;
+    }
+    this._waitingNoticeTs.delete(sessionId);
+    await this.queue.enqueue("chat.delete", {
+      channel: meta.channelId,
+      ts,
+    }).catch((err) => this.log.warn({ err, sessionId, ts }, "Failed to delete waiting notice"));
+  }
+
   private formatSkillCommands(commands: AgentCommand[]): string {
     if (commands.length === 0) return "_No commands available_";
     const lines = ["*Available commands:*"];
@@ -1185,6 +1315,7 @@ export class SlackAdapter extends MessagingAdapter {
     sessionId: string,
     request: PermissionRequest,
   ): Promise<void> {
+    this.getTracer(sessionId)?.log("slack", { action: "permission:send", sessionId, requestId: request.id });
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
 

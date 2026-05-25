@@ -4,6 +4,7 @@ import type { WebClient } from "@slack/web-api";
 export type SlackMethod =
   | "chat.postMessage"
   | "chat.update"
+  | "chat.delete"
   | "conversations.create"
   | "conversations.rename"
   | "conversations.archive"
@@ -17,6 +18,7 @@ export type SlackMethod =
 const METHOD_RPM: Record<SlackMethod, number> = {
   "chat.postMessage":      50,   // Tier 3
   "chat.update":           50,   // Tier 3
+  "chat.delete":           50,   // Tier 3
   "conversations.create":  20,   // Tier 2
   "conversations.rename":  20,   // Tier 2
   "conversations.archive": 20,   // Tier 2
