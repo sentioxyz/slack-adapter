@@ -99,11 +99,17 @@ function createSlackPlugin(): OpenACPPlugin {
       const { SlackAdapter } = await import('./adapter.js')
       // Access the core instance via ctx.core (requires 'kernel:access' permission)
       const core = ctx.core as any
+      // Settings API scoped to this plugin so the adapter can persist
+      // startupChannelId without going through legacy core config.
+      const settingsAPI = core.lifecycleManager?.settingsManager?.createAPI(ctx.pluginName)
+      if (!settingsAPI) {
+        ctx.log.warn('SettingsManager not available — startup channel ID will not persist across restarts')
+      }
       adapter = new SlackAdapter(core, {
         ...config,
         enabled: true,
         maxMessageLength: 3000,
-      } as unknown as SlackChannelConfig, ctx.log)
+      } as unknown as SlackChannelConfig, ctx.log, settingsAPI)
 
       ctx.registerService('adapter:slack', adapter)
       ctx.log.info('Slack adapter registered')

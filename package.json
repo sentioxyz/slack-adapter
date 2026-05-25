@@ -1,6 +1,6 @@
 {
   "name": "@openacp/slack-adapter",
-  "version": "2026.525.1",
+  "version": "2026.525.2",
   "description": "Slack messaging platform adapter plugin for OpenACP",
   "type": "module",
   "main": "dist/index.js",

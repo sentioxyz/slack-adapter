@@ -78,6 +78,62 @@ export function makeThreadReadyHandler(
   };
 }
 
+/**
+ * Minimal SettingsAPI surface the adapter uses to persist runtime state
+ * (currently just `startupChannelId`). The host core creates this via
+ * `settingsManager.createAPI(pluginName)` and passes it to the constructor.
+ */
+export interface SettingsAPI {
+  set(key: string, value: unknown): Promise<void>;
+}
+
+/** Dependencies for the `/openacp-archive` slash command handler. */
+export interface ArchiveCommandDeps {
+  findSessionByChannel(channelId: string): { sessionId: string; meta: SlackSessionMeta } | undefined;
+  archiveChannel(channelId: string): Promise<void>;
+  postEphemeral(args: { channel: string; user: string; text: string }): Promise<void>;
+}
+
+/**
+ * Build the `/openacp-archive` Bolt slash command handler.
+ *
+ * Archives the Slack channel of the current session if invoked inside a
+ * session channel; otherwise posts an ephemeral message saying no session is
+ * bound to this channel. Always ack()s within Slack's 3-second window before
+ * doing any work.
+ *
+ * Exported so tests can exercise the production handler directly without
+ * spinning up Bolt.
+ */
+export function makeArchiveCommandHandler(deps: ArchiveCommandDeps) {
+  return async (args: {
+    ack: () => Promise<void>;
+    command: { channel_id: string; user_id: string };
+  }): Promise<void> => {
+    await args.ack();
+    const channelId = args.command.channel_id;
+    const userId = args.command.user_id;
+    const found = deps.findSessionByChannel(channelId);
+    if (!found) {
+      await deps.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: "No OpenACP session is bound to this channel.",
+      });
+      return;
+    }
+    // Send the ephemeral confirmation BEFORE archiving — Slack rejects
+    // chat.postEphemeral against an archived channel with `is_archived`,
+    // and the user would lose the confirmation message.
+    await deps.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: "Archiving this session channel. Open the notifications channel to start a new session.",
+    });
+    await deps.archiveChannel(channelId);
+  };
+}
+
 /** Minimal interface for the core kernel, accessed via ctx.kernel */
 interface CoreKernel {
   configManager: { get(): Record<string, unknown> };
@@ -144,8 +200,14 @@ export class SlackAdapter extends MessagingAdapter {
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
+  private settingsAPI?: SettingsAPI;
 
-  constructor(core: CoreKernel, config: SlackChannelConfig, logger?: Logger) {
+  constructor(
+    core: CoreKernel,
+    config: SlackChannelConfig,
+    logger?: Logger,
+    settingsAPI?: SettingsAPI,
+  ) {
     super(
       { configManager: core.configManager },
       { ...config as Record<string, unknown>, maxMessageLength: 3000, enabled: config.enabled ?? true } as MessagingAdapterConfig,
@@ -153,6 +215,7 @@ export class SlackAdapter extends MessagingAdapter {
     this.core = core;
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
     this.slackConfig = config;
+    this.settingsAPI = settingsAPI;
     this.formatter = new SlackFormatter();
     (this as { renderer: IRenderer }).renderer = new SlackRenderer(this.formatter);
   }
@@ -201,6 +264,19 @@ export class SlackAdapter extends MessagingAdapter {
       },
     );
     this.permissionHandler.register(this.app);
+
+    // Register /openacp-archive — manifest (setup.ts:33) advertises this command,
+    // so without a handler Slack shows users a "timeout" error.
+    this.app.command("/openacp-archive", makeArchiveCommandHandler({
+      findSessionByChannel: (cid) => this.findSessionByChannel(cid),
+      archiveChannel: async (cid) => {
+        const found = this.findSessionByChannel(cid);
+        if (found) await this.deleteSessionThread(found.sessionId);
+      },
+      postEphemeral: async ({ channel, user, text }) => {
+        await this.app.client.chat.postEphemeral({ channel, user, text });
+      },
+    }));
 
     // Register /outputmode slash command
     this.app.command("/outputmode", async ({ command, ack, client }) => {
@@ -482,12 +558,20 @@ export class SlackAdapter extends MessagingAdapter {
           return;
         }
 
-        // Persist channel ID to config for reuse on next restart
+        // Persist channel ID via plugin settings so the next restart reuses
+        // this channel instead of creating a fresh one (which would orphan
+        // the previous channel and lose history).
         const meta = this.sessions.get(session.id);
         if (meta) {
-          // Note: configManager.save not available in external plugin context.
-          // The host core should handle config persistence.
-          this.log.info({ sessionId: session.id, channelId: meta.channelId }, "Startup channel created");
+          this.slackConfig.startupChannelId = meta.channelId;
+          if (this.settingsAPI) {
+            await this.settingsAPI.set('startupChannelId', meta.channelId).catch((err) => {
+              this.log.warn({ err, sessionId: session.id }, 'Failed to persist startupChannelId — next restart will create another channel');
+            });
+            this.log.info({ sessionId: session.id, channelId: meta.channelId }, "Startup channel created and persisted");
+          } else {
+            this.log.info({ sessionId: session.id, channelId: meta.channelId }, "Startup channel created (not persisted — settingsAPI missing)");
+          }
         }
       }
 
@@ -1045,6 +1129,18 @@ export class SlackAdapter extends MessagingAdapter {
       }
     } catch (err) {
       this.log.error({ err, sessionId }, "Failed to post Slack permission request");
+    }
+
+    // Also ping the notification channel so users see permission prompts even
+    // when they're not actively watching this session's channel. Best-effort:
+    // a failure here must not break the underlying permission flow.
+    if (this.slackConfig.notificationChannelId) {
+      const sess = this.core.sessionManager.getSession(sessionId);
+      const name = sess?.name ?? "Session";
+      this.queue.enqueue("chat.postMessage", {
+        channel: this.slackConfig.notificationChannelId,
+        text: `🔐 *${name}* — Permission needed. <#${meta.channelId}>`,
+      }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post permission notification"));
     }
   }
 
