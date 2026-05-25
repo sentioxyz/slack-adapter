@@ -91,8 +91,8 @@ function createSlackPlugin(): OpenACPPlugin {
     async setup(ctx: PluginContext) {
       const config = ctx.pluginConfig as Record<string, unknown>
       ctx.log.debug(`Slack plugin config check: keys=${Object.keys(config).join(',')}, hasBotToken=${!!config.botToken}`)
-      if (!config.botToken || !config.appToken) {
-        ctx.log.info('Slack disabled (missing botToken or appToken)')
+      if (!config.botToken || !config.appToken || !config.signingSecret) {
+        ctx.log.info('Slack disabled (missing botToken, appToken, or signingSecret)')
         return
       }
 

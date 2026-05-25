@@ -146,6 +146,9 @@ interface CoreKernel {
       name?: string;
       threadId?: string;
       workingDirectory?: string;
+      currentMode?: string;
+      currentModel?: string;
+      dangerousMode?: boolean;
       permissionGate: { requestId: string; resolve(optionId: string): void };
     } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
@@ -156,8 +159,10 @@ interface CoreKernel {
   handleMessage(msg: { channelId: string; threadId: string; userId: string; text: string; attachments?: Attachment[] }): Promise<void>;
   handleNewSession(platform: string, userId?: string, text?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
   eventBus?: {
-    on(event: string, handler: (payload: SessionThreadReadyPayload) => void): void;
-    off(event: string, handler: (payload: SessionThreadReadyPayload) => void): void;
+    // Loosely typed to support different event payload shapes (threadReady,
+    // configChanged, …). Cast in the handler.
+    on(event: string, handler: (payload: any) => void): void;
+    off(event: string, handler: (payload: any) => void): void;
   };
 }
 
@@ -196,6 +201,7 @@ export class SlackAdapter extends MessagingAdapter {
    */
   private _pendingChannelsBySlug = new Map<string, SlackSessionMeta>();
   private _threadReadyHandler?: (payload: SessionThreadReadyPayload) => void;
+  private _configChangedHandler?: (payload: { sessionId: string }) => void;
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -223,8 +229,19 @@ export class SlackAdapter extends MessagingAdapter {
   async start(): Promise<void> {
     const { botToken, appToken, signingSecret } = this.slackConfig;
 
+    // Degrade gracefully — don't throw. A missing-credential failure here
+    // would otherwise cascade and bring the whole host down even though
+    // the user only wanted Slack disabled. The plugin's setup() also
+    // checks botToken/appToken, but signingSecret would otherwise reach
+    // this point and throw.
     if (!botToken || !appToken || !signingSecret) {
-      throw new Error("Slack adapter requires botToken, appToken, and signingSecret");
+      const missing = [
+        !botToken && "botToken",
+        !appToken && "appToken",
+        !signingSecret && "signingSecret",
+      ].filter(Boolean).join(", ");
+      this.log.warn({ missing }, "Slack adapter disabled — missing required credentials");
+      return;
     }
 
     this.app = new App({
@@ -467,6 +484,17 @@ export class SlackAdapter extends MessagingAdapter {
       this.log.warn("core.eventBus is not available — Slack sessions created via createThread:true will not persist channelId across restarts");
     }
 
+    // Post a brief notice when /model, /mode, /bypass etc. change session
+    // config. Telegram updates a pinned control card here; without that UI
+    // in Slack, an inline message at least surfaces the change to the user
+    // who isn't watching log output.
+    this._configChangedHandler = ({ sessionId }) => {
+      this.postConfigChangedNotice(sessionId).catch((err) =>
+        this.log.warn({ err, sessionId }, "Failed to post config-changed notice"),
+      );
+    };
+    this.core.eventBus?.on("session:configChanged", this._configChangedHandler);
+
     // Start Bolt (Socket Mode)
     await this.app.start();
     this.log.info("Slack adapter started (Socket Mode)");
@@ -597,6 +625,10 @@ export class SlackAdapter extends MessagingAdapter {
       this.core.eventBus?.off("session:threadReady", this._threadReadyHandler);
       this._threadReadyHandler = undefined;
     }
+    if (this._configChangedHandler) {
+      this.core.eventBus?.off("session:configChanged", this._configChangedHandler);
+      this._configChangedHandler = undefined;
+    }
     // Cleanup all activity trackers
     for (const [sessionId, tracker] of this.sessionTrackers) {
       try {
@@ -618,7 +650,9 @@ export class SlackAdapter extends MessagingAdapter {
       buf.destroy();
     }
     this.textBuffers.clear();
-    await this.app.stop();
+    // Guard for the graceful-degradation path: if start() returned early
+    // because credentials were missing, this.app was never assigned.
+    if (this.app) await this.app.stop();
     this.log.info("Slack adapter stopped");
   }
 
@@ -965,6 +999,20 @@ export class SlackAdapter extends MessagingAdapter {
   protected async handleAttachment(sessionId: string, content: OutgoingMessage): Promise<void> {
     const meta = this.getSessionMeta(sessionId);
     if (!meta || !content.attachment) return;
+
+    // Slack files.uploadV2 caps at 1GB but workspace bots typically run at
+    // 50MB or lower. Reject early with a friendly message; uploading anything
+    // larger usually fails opaquely with `request_entity_too_large`.
+    const MAX_BYTES = 50 * 1024 * 1024;
+    if (content.attachment.size > MAX_BYTES) {
+      const mb = (content.attachment.size / 1024 / 1024).toFixed(1);
+      await this.queue.enqueue("chat.postMessage", {
+        channel: meta.channelId,
+        text: `⚠️ File too large for Slack (${mb}MB > 50MB limit): \`${content.attachment.fileName}\``,
+      }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post size-limit notice"));
+      return;
+    }
+
     if (content.attachment.type === "audio") {
       try {
         await this.uploadAudioFile(meta.channelId, content.attachment);
@@ -1088,6 +1136,32 @@ export class SlackAdapter extends MessagingAdapter {
     }
   }
 
+  /**
+   * Post an inline notice when session config (model/mode/bypass) changes.
+   * Best-effort: caller swallows errors. Skipped if the session is unknown
+   * or its channel isn't in our map.
+   */
+  private async postConfigChangedNotice(sessionId: string): Promise<void> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const session = this.core.sessionManager.getSession(sessionId);
+    if (!session) return;
+
+    const bits: string[] = [];
+    if (session.currentModel) bits.push(`model: \`${session.currentModel}\``);
+    if (session.currentMode) bits.push(`mode: \`${session.currentMode}\``);
+    if (session.dangerousMode) bits.push("bypass: *on*");
+
+    const summary = bits.length > 0
+      ? `⚙️ Session settings updated — ${bits.join(", ")}`
+      : "⚙️ Session settings updated";
+
+    await this.queue.enqueue("chat.postMessage", {
+      channel: meta.channelId,
+      text: summary,
+    });
+  }
+
   private formatSkillCommands(commands: AgentCommand[]): string {
     if (commands.length === 0) return "_No commands available_";
     const lines = ["*Available commands:*"];
@@ -1192,6 +1266,13 @@ export class SlackAdapter extends MessagingAdapter {
     }
 
     const text = this.formatSkillCommands(commands);
+    // Hydrate from the persisted record on first call after restart so we
+    // update the existing card instead of posting a duplicate.
+    if (!this._skillCommandsTs.has(sessionId)) {
+      const persisted = (this.core.sessionManager.getSessionRecord(sessionId) as any)
+        ?.platform?.skillMsgTs as string | undefined;
+      if (persisted) this._skillCommandsTs.set(sessionId, persisted);
+    }
     const existingTs = this._skillCommandsTs.get(sessionId);
 
     try {
@@ -1208,10 +1289,21 @@ export class SlackAdapter extends MessagingAdapter {
           text,
           blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
         });
-        if (result?.ts) this._skillCommandsTs.set(sessionId, result.ts);
+        if (result?.ts) {
+          this._skillCommandsTs.set(sessionId, result.ts);
+          // Persist so the next restart finds it and updates the same card.
+          const existingRecord = this.core.sessionManager.getSessionRecord(sessionId);
+          this.core.sessionManager.patchRecord(sessionId, {
+            platform: { ...(existingRecord?.platform ?? {}), skillMsgTs: result.ts },
+          }).catch((err) => this.log.warn({ err, sessionId }, "Failed to persist skillMsgTs"));
+        }
       }
     } catch (err) {
-      this.log.warn({ err, sessionId }, "Failed to post/update skill commands");
+      // If the card was deleted by the user (or otherwise lost), chat.update
+      // fails with `message_not_found`. Clear the stale ts so the next call
+      // posts a fresh card instead of looping on the same failure.
+      this._skillCommandsTs.delete(sessionId);
+      this.log.warn({ err, sessionId }, "Failed to post/update skill commands — cleared stale ts");
     }
   }
 
