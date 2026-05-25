@@ -42,15 +42,15 @@ export class SlackEventRouter implements ISlackEventRouter {
     private notificationChannelId: string | undefined,
     private onNewSession: NewSessionCallback,
     private config: SlackChannelConfig,
-    private globalAllowedUserIds: string[] = [],
     logger?: Logger,
   ) {
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   }
 
+  // Empty allowedUserIds means "allow all" — matches Telegram convention and what
+  // the setup wizard advertises ("press Enter to allow all").
   private isAllowedUser(userId: string): boolean {
-    const slackAllowed = this.config.allowedUserIds ?? [];
-    const allowed = slackAllowed.length > 0 ? slackAllowed : this.globalAllowedUserIds;
+    const allowed = this.config.allowedUserIds ?? [];
     if (allowed.length === 0) return true;
     return allowed.includes(userId);
   }

@@ -37,9 +37,50 @@ import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
 
+/** Payload of `SESSION_THREAD_READY` emitted by core after a session+thread is created. */
+export interface SessionThreadReadyPayload {
+  sessionId: string;
+  channelId: string;
+  threadId: string;
+}
+
+/**
+ * Dependencies needed by the `SESSION_THREAD_READY` handler. Extracted so the
+ * handler is unit-testable without booting the full SlackAdapter (Bolt App is
+ * heavy and would dwarf the test).
+ */
+export interface ThreadReadyDeps {
+  sessions: Map<string, SlackSessionMeta>;
+  pendingChannelsBySlug: Map<string, SlackSessionMeta>;
+  patchRecord(sessionId: string, patch: { platform: { channelId: string; threadId: string } }): Promise<void>;
+  onError?(err: unknown, sessionId: string): void;
+}
+
+/**
+ * Build the `SESSION_THREAD_READY` handler. Re-keys a pre-created channel
+ * (stashed by slug in `pendingChannelsBySlug`) onto the real sessionId and
+ * persists `platform.channelId` so the session can be restored after restart.
+ *
+ * Exported for direct testing — see `__tests__/thread-ready-persistence.test.ts`.
+ */
+export function makeThreadReadyHandler(
+  deps: ThreadReadyDeps,
+): (payload: SessionThreadReadyPayload) => void {
+  return (payload) => {
+    if (payload.channelId !== "slack") return;
+    const meta = deps.pendingChannelsBySlug.get(payload.threadId);
+    if (!meta) return;
+    deps.pendingChannelsBySlug.delete(payload.threadId);
+    deps.sessions.set(payload.sessionId, meta);
+    deps.patchRecord(payload.sessionId, {
+      platform: { channelId: meta.channelId, threadId: payload.threadId },
+    }).catch((err) => deps.onError?.(err, payload.sessionId));
+  };
+}
+
 /** Minimal interface for the core kernel, accessed via ctx.kernel */
 interface CoreKernel {
-  configManager: { get(): { security: { allowedUserIds: string[] } } };
+  configManager: { get(): Record<string, unknown> };
   lifecycleManager?: {
     serviceRegistry?: { get(name: string): unknown };
   };
@@ -58,6 +99,10 @@ interface CoreKernel {
   fileService: FileServiceInterface;
   handleMessage(msg: { channelId: string; threadId: string; userId: string; text: string; attachments?: Attachment[] }): Promise<void>;
   handleNewSession(platform: string, userId?: string, text?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
+  eventBus?: {
+    on(event: string, handler: (payload: SessionThreadReadyPayload) => void): void;
+    off(event: string, handler: (payload: SessionThreadReadyPayload) => void): void;
+  };
 }
 
 export class SlackAdapter extends MessagingAdapter {
@@ -87,6 +132,14 @@ export class SlackAdapter extends MessagingAdapter {
   private _skillCommandsTs = new Map<string, string>();
   /** Commands queued before a session channel was ready */
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
+  /**
+   * Channel meta keyed by slug for channels created BEFORE the real sessionId is
+   * known. Core calls `createSessionThread("", name)` because session.id isn't
+   * assigned yet; we stash the meta here and re-key into `sessions` once
+   * `SESSION_THREAD_READY` fires with the real sessionId.
+   */
+  private _pendingChannelsBySlug = new Map<string, SlackSessionMeta>();
+  private _threadReadyHandler?: (payload: SessionThreadReadyPayload) => void;
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -314,10 +367,29 @@ export class SlackAdapter extends MessagingAdapter {
         }
       },
       this.slackConfig,
-      this.core.configManager.get().security.allowedUserIds,
       this.log,
     );
     this.eventRouter.register(this.app);
+
+    // Re-key pre-created channels onto the real sessionId once core emits
+    // SESSION_THREAD_READY. Without this, channels created via
+    // `createSessionThread("", name)` would be orphaned in the sessions Map
+    // and never persist channelId — causing "No Slack channel for session"
+    // after restart.
+    this._threadReadyHandler = makeThreadReadyHandler({
+      sessions: this.sessions,
+      pendingChannelsBySlug: this._pendingChannelsBySlug,
+      patchRecord: (sessionId, patch) => this.core.sessionManager.patchRecord(sessionId, patch),
+      onError: (err, sessionId) => this.log.warn({ err, sessionId }, "Failed to persist Slack channelId"),
+    });
+    if (this.core.eventBus) {
+      this.core.eventBus.on("session:threadReady", this._threadReadyHandler);
+    } else {
+      // Without eventBus, channels created via `createSessionThread("", ...)` never
+      // get re-keyed onto the real sessionId — bug 4 silently reoccurs. Surface this
+      // loudly so it's caught in dev, not in a user's session weeks later.
+      this.log.warn("core.eventBus is not available — Slack sessions created via createThread:true will not persist channelId across restarts");
+    }
 
     // Start Bolt (Socket Mode)
     await this.app.start();
@@ -437,6 +509,10 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   async stop(): Promise<void> {
+    if (this._threadReadyHandler) {
+      this.core.eventBus?.off("session:threadReady", this._threadReadyHandler);
+      this._threadReadyHandler = undefined;
+    }
     // Cleanup all activity trackers
     for (const [sessionId, tracker] of this.sessionTrackers) {
       try {
@@ -466,14 +542,23 @@ export class SlackAdapter extends MessagingAdapter {
 
   async createSessionThread(sessionId: string, name: string): Promise<string> {
     const meta = await this.channelManager.createChannel(sessionId, name);
-    this.sessions.set(sessionId, meta);
+
+    if (sessionId) {
+      // Direct caller knew the sessionId — register and persist immediately.
+      // The startup reuse path bypasses this method (createThread:false), so this
+      // branch is reserved for any future caller that already has session.id.
+      this.sessions.set(sessionId, meta);
+      await this.core.sessionManager.patchRecord(sessionId, {
+        platform: { channelId: meta.channelId, threadId: meta.channelSlug },
+      });
+    } else {
+      // Core invokes us with sessionId="" before session.id is assigned. Stash
+      // the meta by slug; SESSION_THREAD_READY will re-key it once the real
+      // sessionId is known, and patchRecord then persists channelId.
+      this._pendingChannelsBySlug.set(meta.channelSlug, meta);
+    }
+
     this.log.info({ sessionId, channelId: meta.channelId, slug: meta.channelSlug }, "Session channel created");
-    // Persist Slack-specific channelId (C01234...) so it can be recovered after restart.
-    // Core will also patchRecord with platform.threadId after this returns; it merges,
-    // so the final record will have both channelId and threadId.
-    await this.core.sessionManager.patchRecord(sessionId, {
-      platform: { channelId: meta.channelId },
-    });
     // Return the slug as the threadId so that lookups via getSessionByThread work
     return meta.channelSlug;
   }

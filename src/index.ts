@@ -5,7 +5,7 @@ function createSlackPlugin(): OpenACPPlugin {
   let adapter: { stop(): Promise<void> } | null = null
 
   return {
-    name: '@openacp/slack',
+    name: '@openacp/slack-adapter',
     version: '1.0.0',
     description: 'Slack adapter with channels and threads',
     essential: false,
