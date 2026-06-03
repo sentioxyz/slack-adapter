@@ -130,6 +130,14 @@ export function makeArchiveCommandHandler(deps: ArchiveCommandDeps) {
       });
       return;
     }
+    if (found.meta.threadTs) {
+      await deps.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: "This is a subscribed channel — OpenACP will not archive it.",
+      });
+      return;
+    }
     // Send the ephemeral confirmation BEFORE archiving — Slack rejects
     // chat.postEphemeral against an archived channel with `is_archived`,
     // and the user would lose the confirmation message.
@@ -740,16 +748,28 @@ export class SlackAdapter extends MessagingAdapter {
     if (!meta) return;
 
     try {
-      await this.permissionHandler.cleanupSession(meta.channelId);
+      if (meta.threadTs) {
+        const sess = this.core.sessionManager.getSession(sessionId);
+        const requestId = sess?.permissionGate?.requestId;
+        if (requestId) await this.permissionHandler.cleanupRequest(requestId);
+      } else {
+        await this.permissionHandler.cleanupSession(meta.channelId);
+      }
     } catch (err) {
       this.log.warn({ err, sessionId }, "Failed to clean up permission buttons");
     }
 
-    try {
-      await this.channelManager.archiveChannel(meta.channelId);
-      this.log.info({ sessionId, channelId: meta.channelId }, "Session channel archived");
-    } catch (err) {
-      this.log.warn({ err, sessionId }, "Failed to archive Slack channel");
+    if (meta.threadTs) {
+      // Subscription thread session: the channel is a real, shared business
+      // channel — never archive it. Only in-memory state is torn down below.
+      this.log.info({ sessionId, channelId: meta.channelId }, "Subscription thread ended (channel preserved)");
+    } else {
+      try {
+        await this.channelManager.archiveChannel(meta.channelId);
+        this.log.info({ sessionId, channelId: meta.channelId }, "Session channel archived");
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Failed to archive Slack channel");
+      }
     }
     this.sessions.delete(sessionId);
     const buf = this.textBuffers.get(sessionId);

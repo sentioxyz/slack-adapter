@@ -8,6 +8,7 @@ export interface ISlackPermissionHandler {
   register(app: App): void;
   trackPendingMessage(requestId: string, channelId: string, messageTs: string, options?: PermissionOption[]): void;
   cleanupSession(channelId: string): Promise<void>;
+  cleanupRequest(requestId: string): Promise<void>;
 }
 
 export class SlackPermissionHandler implements ISlackPermissionHandler {
@@ -32,6 +33,22 @@ export class SlackPermissionHandler implements ISlackPermissionHandler {
       });
       this.pendingMessages.delete(requestId);
     }
+  }
+
+  /**
+   * Clear the buttons for a single pending request. Used when a session ends so
+   * sibling threads sharing the same channel (subscription mode) are untouched —
+   * unlike cleanupSession(channelId), which clears every request in a channel.
+   */
+  async cleanupRequest(requestId: string): Promise<void> {
+    const info = this.pendingMessages.get(requestId);
+    if (!info) return;
+    await this.queue.enqueue("chat.update", {
+      channel: info.channelId,
+      ts: info.messageTs,
+      blocks: [],
+    });
+    this.pendingMessages.delete(requestId);
   }
 
   register(app: App): void {
