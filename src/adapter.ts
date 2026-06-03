@@ -857,10 +857,15 @@ export class SlackAdapter extends MessagingAdapter {
     return this.sessions.get(sessionId);
   }
 
-  private getTextBuffer(sessionId: string, channelId: string): SlackTextBuffer {
+  /** Spread into chat.postMessage params to thread output for subscription sessions. */
+  private threadParams(meta: SlackSessionMeta): { thread_ts?: string } {
+    return meta.threadTs ? { thread_ts: meta.threadTs } : {};
+  }
+
+  private getTextBuffer(sessionId: string, channelId: string, threadTs?: string): SlackTextBuffer {
     let buf = this.textBuffers.get(sessionId);
     if (!buf) {
-      buf = new SlackTextBuffer(channelId, sessionId, this.queue, this.log);
+      buf = new SlackTextBuffer(channelId, threadTs, sessionId, this.queue, this.log);
       this.textBuffers.set(sessionId, buf);
     }
     return buf;
@@ -895,6 +900,7 @@ export class SlackAdapter extends MessagingAdapter {
         outputMode: mode,
         tunnelService,
         sessionContext,
+        threadTs: this.getSessionMeta(sessionId)?.threadTs,
       });
       this.sessionTrackers.set(sessionId, tracker);
     } else {
@@ -1027,7 +1033,7 @@ export class SlackAdapter extends MessagingAdapter {
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) await tracker.onTextStart();
 
-    const buf = this.getTextBuffer(sessionId, meta.channelId);
+    const buf = this.getTextBuffer(sessionId, meta.channelId, meta.threadTs);
     buf.append(content.text ?? "");
   }
 
@@ -1053,6 +1059,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1083,6 +1090,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1203,6 +1211,7 @@ export class SlackAdapter extends MessagingAdapter {
         } else {
           const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
             channel: meta.channelId,
+            ...this.threadParams(meta),
             text,
           });
           if (result?.ts) this._lastUsageTs.set(sessionId, result.ts);
@@ -1254,6 +1263,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1360,6 +1370,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       const result = await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: `Permission request: ${request.description}`,
         blocks,
       });
@@ -1452,6 +1463,7 @@ export class SlackAdapter extends MessagingAdapter {
       } else {
         const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
           channel: meta.channelId,
+          ...this.threadParams(meta),
           text,
           blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
         });

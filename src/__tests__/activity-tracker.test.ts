@@ -236,4 +236,23 @@ describe("SlackActivityTracker", () => {
       tracker.destroy();
     });
   });
+
+  describe("channel subscription threading", () => {
+    it("roots the main message in the outer thread when threadTs is set", async () => {
+      const enqueue = vi.fn().mockResolvedValue({ ok: true, ts: "1.1" });
+      const queue = { enqueue } as any;
+      const tracker = new SlackActivityTracker({
+        channelId: "C_SUB",
+        sessionId: "sess-1",
+        queue,
+        outputMode: "medium",
+        threadTs: "169.1",
+      });
+      await tracker.onNewPrompt();
+      expect(enqueue).toHaveBeenCalledWith(
+        "chat.postMessage",
+        expect.objectContaining({ channel: "C_SUB", thread_ts: "169.1" }),
+      );
+    });
+  });
 });
