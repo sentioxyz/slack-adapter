@@ -798,8 +798,21 @@ export class SlackAdapter extends MessagingAdapter {
     const def = registry.get(commandName);
     if (!def) return false; // not a registered command, let agent handle it
 
-    const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id ?? null;
-    const meta = sessionId ? this.getSessionMeta(sessionId) : undefined;
+    let sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id ?? null;
+    let meta = sessionId ? this.getSessionMeta(sessionId) : undefined;
+    // Subscription sessions register their meta in this.sessions (keyed by the
+    // resolved session id) before the agent is live. Fall back to that map by
+    // slug so a /command as the first post-restart reply still resolves its
+    // session and threads its response correctly.
+    if (!meta) {
+      for (const [sid, m] of this.sessions) {
+        if (m.channelSlug === sessionChannelSlug) {
+          sessionId = sid;
+          meta = m;
+          break;
+        }
+      }
+    }
     const channelId = meta?.channelId;
 
     try {
