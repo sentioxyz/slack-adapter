@@ -82,3 +82,51 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
   if (!triggered || !msg.ts) return { kind: "ignore" };
   return { kind: "sub-start", channelId, threadTs: msg.ts, userId, text };
 }
+
+export interface ThreadSessionDeps {
+  sessions: Map<string, SlackSessionMeta>;
+  getSessionByThread: (platform: string, threadId: string) => { id: string } | undefined;
+  handleNewSession: (
+    platform: string,
+    userId?: string,
+    text?: string,
+    opts?: { createThread: boolean },
+  ) => Promise<{ id: string; threadId?: string }>;
+  patchRecord: (sessionId: string, patch: Record<string, unknown>) => Promise<void>;
+}
+
+/**
+ * Resolve the session that owns a (channelId, threadTs) thread, creating one
+ * bound to the *existing* channel if none exists. Uses `createThread: false`
+ * so no new Slack channel is created — the thread root is the binding.
+ */
+export async function resolveThreadSession(
+  deps: ThreadSessionDeps,
+  channelId: string,
+  threadTs: string,
+  userId: string,
+): Promise<{ sessionId: string; meta: SlackSessionMeta }> {
+  const key = `${channelId}:${threadTs}`;
+
+  for (const [sid, meta] of deps.sessions) {
+    if (meta.channelId === channelId && meta.threadTs === threadTs) {
+      return { sessionId: sid, meta };
+    }
+  }
+
+  const existing = deps.getSessionByThread("slack", key);
+  if (existing) {
+    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
+    deps.sessions.set(existing.id, meta);
+    return { sessionId: existing.id, meta };
+  }
+
+  const session = await deps.handleNewSession("slack", userId, undefined, { createThread: false });
+  const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
+  deps.sessions.set(session.id, meta);
+  (session as { threadId?: string }).threadId = key;
+  await deps.patchRecord(session.id, {
+    platform: { channelId, topicId: key, threadTs },
+  });
+  return { sessionId: session.id, meta };
+}

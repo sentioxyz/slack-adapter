@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifySubscription } from "../subscription-router.js";
 import type { SubscriptionContext } from "../subscription-router.js";
+import { resolveThreadSession } from "../subscription-router.js";
+import type { ThreadSessionDeps } from "../subscription-router.js";
+import type { SlackSessionMeta } from "../types.js";
 
 function ctx(overrides: Partial<SubscriptionContext> = {}): SubscriptionContext {
   return {
@@ -71,5 +74,46 @@ describe("classifySubscription", () => {
       ctx({ hasThreadSession: () => false }),
     );
     expect(r.kind).toBe("ignore");
+  });
+});
+
+function deps(overrides: Partial<ThreadSessionDeps> = {}): ThreadSessionDeps {
+  return {
+    sessions: new Map<string, SlackSessionMeta>(),
+    getSessionByThread: () => undefined,
+    handleNewSession: vi.fn(async () => ({ id: "sess-new" })),
+    patchRecord: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+describe("resolveThreadSession", () => {
+  it("reuses an in-memory session for the same thread", async () => {
+    const sessions = new Map<string, SlackSessionMeta>([
+      ["sess-1", { channelId: "C_SUB", channelSlug: "C_SUB:169.1", threadTs: "169.1" }],
+    ]);
+    const d = deps({ sessions });
+    const r = await resolveThreadSession(d, "C_SUB", "169.1", "U1");
+    expect(r.sessionId).toBe("sess-1");
+    expect(d.handleNewSession).not.toHaveBeenCalled();
+  });
+
+  it("restores a persisted session after restart and caches its meta", async () => {
+    const d = deps({ getSessionByThread: () => ({ id: "sess-persisted" }) });
+    const r = await resolveThreadSession(d, "C_SUB", "169.1", "U1");
+    expect(r.sessionId).toBe("sess-persisted");
+    expect(d.sessions.get("sess-persisted")).toEqual({ channelId: "C_SUB", channelSlug: "C_SUB:169.1", threadTs: "169.1" });
+    expect(d.handleNewSession).not.toHaveBeenCalled();
+  });
+
+  it("creates a new session bound to the existing channel and persists platform fields", async () => {
+    const d = deps();
+    const r = await resolveThreadSession(d, "C_SUB", "169.1", "U1");
+    expect(d.handleNewSession).toHaveBeenCalledWith("slack", "U1", undefined, { createThread: false });
+    expect(r.meta).toEqual({ channelId: "C_SUB", channelSlug: "C_SUB:169.1", threadTs: "169.1" });
+    expect(d.sessions.get("sess-new")).toEqual(r.meta);
+    expect(d.patchRecord).toHaveBeenCalledWith("sess-new", {
+      platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1" },
+    });
   });
 });
