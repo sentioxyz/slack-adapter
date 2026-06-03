@@ -28,6 +28,14 @@ export const SlackChannelConfigSchema = z.object({
   channelPrefix: z.string().default("openacp"),
   autoCreateSession: z.boolean().default(true),
   startupChannelId: z.string().optional(),
+  subscribedChannels: z
+    .array(
+      z.object({
+        channelId: z.string(),
+        trigger: z.enum(["mention", "all"]).default("mention"),
+      }),
+    )
+    .default([]),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
@@ -35,7 +43,9 @@ export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
 // Per-session metadata stored in SessionRecord.platform
 export interface SlackSessionMeta {
   channelId: string;     // Slack channel ID for this session (C...)
-  channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9"
+  channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9", or "C123:169..." for subscription threads
+  /** Slack thread root (parent message ts) when this session is bound to a subscribed channel thread. */
+  threadTs?: string;
 }
 
 /** Minimal file metadata extracted from Slack message events (subtype: file_share) */
