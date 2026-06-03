@@ -36,6 +36,7 @@ import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
+import { resolveThreadSession } from "./subscription-router.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -382,49 +383,12 @@ export class SlackAdapter extends MessagingAdapter {
     this.eventRouter = new SlackEventRouter(
       (slackChannelId) => {
         for (const meta of this.sessions.values()) {
-          if (meta.channelId === slackChannelId) return meta;
+          if (meta.channelId === slackChannelId && !meta.threadTs) return meta;
         }
         return undefined;
       },
-      async (sessionChannelSlug, text, userId, files) => {
-        const processFiles = async (): Promise<Attachment[] | undefined> => {
-          if (!files?.length) return undefined;
-          const audioFiles = files.filter((f) => isAudioClip(f));
-          if (!audioFiles.length) return undefined;
-
-          const attachments: Attachment[] = [];
-          for (const file of audioFiles) {
-            const buffer = await this.downloadSlackFile(file.url_private);
-            if (!buffer) continue;
-            const mimeType = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
-            const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
-            if (!sessionId) continue;
-            const att = await this.fileService.saveFile(sessionId, file.name, buffer, mimeType);
-            attachments.push(att);
-          }
-          return attachments.length > 0 ? attachments : undefined;
-        };
-
-        // CommandRegistry dispatch — intercept /commands before sending to agent
-        if (text.startsWith("/")) {
-          const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
-          if (handled) return;
-        }
-
-        processFiles()
-          .then((attachments) => {
-            this.core
-              .handleMessage({
-                channelId: "slack",
-                threadId: sessionChannelSlug,
-                userId,
-                text,
-                attachments,
-              })
-              .catch((err) => this.log.error({ err }, "handleMessage error"));
-          })
-          .catch((err) => this.log.error({ err }, "Failed to process audio files"));
-      },
+      (sessionChannelSlug, text, userId, files) =>
+        this.dispatchToSession(sessionChannelSlug, text, userId, files),
       this.botUserId,
       this.slackConfig.notificationChannelId,
       // onNewSession: create a new session with a private channel
@@ -473,6 +437,26 @@ export class SlackAdapter extends MessagingAdapter {
         }
       },
       this.slackConfig,
+      (channelId, threadTs) => this.hasThreadSession(channelId, threadTs),
+      // onSubscriptionMessage: bind the thread to a session and dispatch
+      async (channelId, threadTs, userId, text, files) => {
+        try {
+          const { meta } = await resolveThreadSession(
+            {
+              sessions: this.sessions,
+              getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
+              handleNewSession: (p, u, t, o) => this.core.handleNewSession(p, u, t, o),
+              patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
+            },
+            channelId,
+            threadTs,
+            userId,
+          );
+          await this.dispatchToSession(meta.channelSlug, text, userId, files);
+        } catch (err) {
+          this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
+        }
+      },
       this.log,
     );
     this.eventRouter.register(this.app);
@@ -928,6 +912,14 @@ export class SlackAdapter extends MessagingAdapter {
     return undefined;
   }
 
+  /** True if a session already owns (channelId, threadTs) — in memory or persisted. */
+  private hasThreadSession(channelId: string, threadTs: string): boolean {
+    for (const meta of this.sessions.values()) {
+      if (meta.channelId === channelId && meta.threadTs === threadTs) return true;
+    }
+    return !!this.core.sessionManager.getSessionByThread("slack", `${channelId}:${threadTs}`);
+  }
+
   /**
    * Attempt to restore a session's Slack channel metadata from the persisted session record.
    *
@@ -955,6 +947,49 @@ export class SlackAdapter extends MessagingAdapter {
     } catch (err) {
       this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
     }
+  }
+
+  /**
+   * Forward a user message to core for an existing session, identified by its
+   * threadId slug. Handles /command interception and audio attachments. Shared
+   * by the legacy event-router path and the channel-subscription path.
+   */
+  private async dispatchToSession(
+    sessionChannelSlug: string,
+    text: string,
+    userId: string,
+    files?: SlackFileInfo[],
+  ): Promise<void> {
+    const processFiles = async (): Promise<Attachment[] | undefined> => {
+      if (!files?.length) return undefined;
+      const audioFiles = files.filter((f) => isAudioClip(f));
+      if (!audioFiles.length) return undefined;
+
+      const attachments: Attachment[] = [];
+      for (const file of audioFiles) {
+        const buffer = await this.downloadSlackFile(file.url_private);
+        if (!buffer) continue;
+        const mimeType = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
+        const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
+        if (!sessionId) continue;
+        const att = await this.fileService.saveFile(sessionId, file.name, buffer, mimeType);
+        attachments.push(att);
+      }
+      return attachments.length > 0 ? attachments : undefined;
+    };
+
+    if (text.startsWith("/")) {
+      const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
+      if (handled) return;
+    }
+
+    const attachments = await processFiles().catch((err) => {
+      this.log.error({ err }, "Failed to process audio files");
+      return undefined;
+    });
+    await this.core
+      .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text, attachments })
+      .catch((err) => this.log.error({ err }, "handleMessage error"));
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
