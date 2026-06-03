@@ -2,6 +2,7 @@
 import type { App } from "@slack/bolt";
 import type { SlackSessionMeta, SlackFileInfo, Logger } from "./types.js";
 import type { SlackChannelConfig } from "./types.js";
+import { classifySubscription } from "./subscription-router.js";
 
 /** Subset of Bolt's message event fields used by the router */
 interface SlackMessageEvent {
@@ -10,6 +11,8 @@ interface SlackMessageEvent {
   channel: string;
   text?: string;
   user?: string;
+  ts?: string;
+  thread_ts?: string;
   files?: Array<{
     id: string;
     name: string;
@@ -28,6 +31,15 @@ export type IncomingMessageCallback = (sessionId: string, text: string, userId: 
 // Callback to create a new session when user messages the notification channel
 export type NewSessionCallback = (text: string, userId: string) => void;
 
+// Callback to dispatch a subscribed-channel message (start or continue a thread session)
+export type SubscriptionMessageCallback = (
+  channelId: string,
+  threadTs: string,
+  userId: string,
+  text: string,
+  files?: SlackFileInfo[],
+) => void | Promise<void>;
+
 export interface ISlackEventRouter {
   register(app: App): void;
 }
@@ -42,6 +54,8 @@ export class SlackEventRouter implements ISlackEventRouter {
     private notificationChannelId: string | undefined,
     private onNewSession: NewSessionCallback,
     private config: SlackChannelConfig,
+    private hasThreadSession?: (channelId: string, threadTs: string) => boolean,
+    private onSubscriptionMessage?: SubscriptionMessageCallback,
     logger?: Logger,
   ) {
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
@@ -61,17 +75,6 @@ export class SlackEventRouter implements ISlackEventRouter {
 
       const msg = message as unknown as SlackMessageEvent;
 
-      if (msg.bot_id) return;
-      const subtype = msg.subtype;
-      if (subtype && subtype !== "file_share") return;  // edited, deleted, etc.
-
-      // Ignore thread replies — only channel-level messages route to sessions
-      if ((message as any).thread_ts) return;
-
-      const channelId = msg.channel;
-      const text: string = msg.text ?? "";
-      const userId: string = msg.user ?? "";
-
       const files: SlackFileInfo[] | undefined = msg.files?.map((f) => ({
         id: f.id,
         name: f.name,
@@ -80,12 +83,46 @@ export class SlackEventRouter implements ISlackEventRouter {
         url_private: f.url_private,
       }));
 
+      // Subscription path: self-contained decision. Returns "ignore" for any
+      // channel not in subscribedChannels, so legacy behavior is untouched.
+      const cls = classifySubscription(
+        {
+          bot_id: msg.bot_id,
+          subtype: msg.subtype,
+          channel: msg.channel,
+          text: msg.text,
+          user: msg.user,
+          ts: msg.ts,
+          thread_ts: msg.thread_ts,
+        },
+        {
+          subscribedChannels: this.config.subscribedChannels ?? [],
+          botUserId: this.botUserId,
+          allowedUserIds: this.config.allowedUserIds ?? [],
+          hasThreadSession: this.hasThreadSession ?? (() => false),
+        },
+      );
+      if (cls.kind !== "ignore") {
+        await this.onSubscriptionMessage?.(cls.channelId, cls.threadTs, cls.userId, cls.text, files);
+        return;
+      }
+
+      // ----- Legacy routing (unchanged) -----
+      if (msg.bot_id) return;
+      const subtype = msg.subtype;
+      if (subtype && subtype !== "file_share") return; // edited, deleted, etc.
+
+      // Ignore thread replies — only channel-level messages route to legacy sessions
+      if (msg.thread_ts) return;
+
+      const channelId = msg.channel;
+      const text: string = msg.text ?? "";
+      const userId: string = msg.user ?? "";
+
       this.log.debug({ channelId, userId, text }, "Slack message received");
 
-      // Ignore messages from the bot itself
       if (userId === this.botUserId) return;
 
-      // Enforce allowedUserIds
       if (!this.isAllowedUser(userId)) {
         this.log.warn({ userId }, "slack: message from non-allowed user rejected");
         return;
@@ -93,7 +130,6 @@ export class SlackEventRouter implements ISlackEventRouter {
 
       const session = this.sessionLookup(channelId);
       if (session) {
-        // Message to an existing session channel
         this.log.debug({ channelId, sessionSlug: session.channelSlug }, "Routing to session");
         this.onIncoming(session.channelSlug, text, userId, files);
         return;
@@ -101,14 +137,12 @@ export class SlackEventRouter implements ISlackEventRouter {
 
       this.log.debug({ channelId, notificationChannelId: this.notificationChannelId }, "No session found for channel");
 
-      // Message to the notification channel -> create new session
       if (this.notificationChannelId && channelId === this.notificationChannelId) {
         this.onNewSession(text, userId);
         return;
       }
 
-      // DM to bot -> auto-create new session
-      if (channelId.startsWith('D')) {
+      if (channelId.startsWith("D")) {
         this.log.debug({ channelId, userId }, "DM received, creating new session");
         this.onNewSession(text, userId);
         return;

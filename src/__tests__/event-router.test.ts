@@ -213,4 +213,60 @@ describe("SlackEventRouter", () => {
     await app._trigger("message", { message: { channel: "NOTIF", user: "U_ANYONE", text: "hello" } });
     expect(onNewSession).toHaveBeenCalledWith("hello", "U_ANYONE");
   });
+
+  it("routes a subscribed-channel mention to onSubscriptionMessage", async () => {
+    const onIncoming = vi.fn();
+    const onNewSession = vi.fn();
+    const onSubscription = vi.fn();
+    const sessionLookup = vi.fn().mockReturnValue(undefined);
+    const router = new SlackEventRouter(
+      sessionLookup, onIncoming, "BOT1", "NOTIF", onNewSession,
+      makeConfig({ subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+      () => false,
+      onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> hi", ts: "169.1" } });
+
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined);
+    expect(onIncoming).not.toHaveBeenCalled();
+    expect(onNewSession).not.toHaveBeenCalled();
+  });
+
+  it("routes a subscribed-channel thread reply to onSubscriptionMessage when the thread is known", async () => {
+    const onSubscription = vi.fn();
+    const router = new SlackEventRouter(
+      vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
+      makeConfig({ subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+      () => true,
+      onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "more", ts: "169.2", thread_ts: "169.1" } });
+
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "more", undefined);
+  });
+
+  it("leaves legacy routing unchanged for non-subscribed channels", async () => {
+    const onIncoming = vi.fn();
+    const onSubscription = vi.fn();
+    const sessionLookup = vi.fn().mockReturnValue({ channelId: "C123", channelSlug: "openacp-session-abc1" });
+    const router = new SlackEventRouter(
+      sessionLookup, onIncoming, "BOT1", "NOTIF", vi.fn(),
+      makeConfig({ subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+      () => false,
+      onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C123", user: "U1", text: "hello" } });
+
+    expect(onIncoming).toHaveBeenCalledWith("openacp-session-abc1", "hello", "U1", undefined);
+    expect(onSubscription).not.toHaveBeenCalled();
+  });
 });
