@@ -958,6 +958,7 @@ export class SlackAdapter extends MessagingAdapter {
     const channelId = record?.platform?.channelId as string | undefined;
     // Startup reuse sessions use topicId; normal sessions use threadId
     const channelSlug = (record?.platform?.threadId ?? record?.platform?.topicId) as string | undefined;
+    const threadTs = record?.platform?.threadTs as string | undefined;
     if (!channelId || !channelSlug) return;
 
     try {
@@ -968,7 +969,7 @@ export class SlackAdapter extends MessagingAdapter {
       if (info?.channel?.is_archived) {
         await this.queue.enqueue("conversations.unarchive", { channel: channelId });
       }
-      this.sessions.set(sessionId, { channelId, channelSlug });
+      this.sessions.set(sessionId, { channelId, channelSlug, threadTs });
       this.log.info({ sessionId, channelId, channelSlug }, "Restored session channel from record after restart");
     } catch (err) {
       this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
