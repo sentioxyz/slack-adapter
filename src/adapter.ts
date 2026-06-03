@@ -1111,6 +1111,7 @@ export class SlackAdapter extends MessagingAdapter {
       const mb = (content.attachment.size / 1024 / 1024).toFixed(1);
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: `⚠️ File too large for Slack (${mb}MB > 50MB limit): \`${content.attachment.fileName}\``,
       }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post size-limit notice"));
       return;
@@ -1294,6 +1295,7 @@ export class SlackAdapter extends MessagingAdapter {
 
     await this.queue.enqueue("chat.postMessage", {
       channel: meta.channelId,
+      ...this.threadParams(meta),
       text: summary,
     });
   }
@@ -1313,6 +1315,7 @@ export class SlackAdapter extends MessagingAdapter {
     const text = `📋 Message queued (#${position} in line). Agent is processing the previous prompt.`;
     const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
       channel: meta.channelId,
+      ...this.threadParams(meta),
       text,
     });
     if (result?.ts) this._waitingNoticeTs.set(sessionId, result.ts);
