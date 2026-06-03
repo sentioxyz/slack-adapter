@@ -168,12 +168,13 @@ interface CoreKernel {
       permissionGate: { requestId: string; resolve(optionId: string): void };
     } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
+    getRecordByThread(platform: string, threadId: string): { sessionId: string } | undefined;
     getSessionRecord(id: string): { platform?: Record<string, unknown> } | undefined;
     patchRecord(id: string, patch: Record<string, unknown>): Promise<void>;
   };
   fileService: FileServiceInterface;
   handleMessage(msg: { channelId: string; threadId: string; userId: string; text: string; attachments?: Attachment[] }): Promise<void>;
-  handleNewSession(platform: string, userId?: string, text?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
+  handleNewSession(platform: string, agentName?: string, workspacePath?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
   eventBus?: {
     // Loosely typed to support different event payload shapes (threadReady,
     // configChanged, …). Cast in the handler.
@@ -453,12 +454,12 @@ export class SlackAdapter extends MessagingAdapter {
             {
               sessions: this.sessions,
               getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
-              handleNewSession: (p, u, t, o) => this.core.handleNewSession(p, u, t, o),
+              getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
+              handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
               patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
             },
             channelId,
             threadTs,
-            userId,
           );
           await this.dispatchToSession(meta.channelSlug, text, userId, files);
         } catch (err) {
@@ -845,6 +846,7 @@ export class SlackAdapter extends MessagingAdapter {
         if (replyText || replyBlocks) {
           await this.queue.enqueue("chat.postMessage", {
             channel: channelId,
+            ...(meta ? this.threadParams(meta) : {}),
             text: replyText,
             ...(replyBlocks && { blocks: replyBlocks }),
           });
@@ -856,6 +858,7 @@ export class SlackAdapter extends MessagingAdapter {
       if (channelId) {
         await this.queue.enqueue("chat.postMessage", {
           channel: channelId,
+          ...(meta ? this.threadParams(meta) : {}),
           text: `⚠️ Command failed: ${err instanceof Error ? err.message : String(err)}`,
         }).catch(() => {});
       }
@@ -938,12 +941,14 @@ export class SlackAdapter extends MessagingAdapter {
     return undefined;
   }
 
-  /** True if a session already owns (channelId, threadTs) — in memory or persisted. */
+  /** True if a session already owns (channelId, threadTs) — in memory, live, or persisted. */
   private hasThreadSession(channelId: string, threadTs: string): boolean {
     for (const meta of this.sessions.values()) {
       if (meta.channelId === channelId && meta.threadTs === threadTs) return true;
     }
-    return !!this.core.sessionManager.getSessionByThread("slack", `${channelId}:${threadTs}`);
+    const key = `${channelId}:${threadTs}`;
+    if (this.core.sessionManager.getSessionByThread("slack", key)) return true;
+    return !!this.core.sessionManager.getRecordByThread("slack", key);
   }
 
   /**

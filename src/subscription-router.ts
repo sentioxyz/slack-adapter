@@ -86,25 +86,27 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 export interface ThreadSessionDeps {
   sessions: Map<string, SlackSessionMeta>;
   getSessionByThread: (platform: string, threadId: string) => { id: string } | undefined;
+  getRecordByThread: (platform: string, threadId: string) => { sessionId: string } | undefined;
   handleNewSession: (
     platform: string,
-    userId?: string,
-    text?: string,
+    agentName?: string,
+    workspacePath?: string,
     opts?: { createThread: boolean },
   ) => Promise<{ id: string; threadId?: string }>;
   patchRecord: (sessionId: string, patch: Record<string, unknown>) => Promise<void>;
 }
 
 /**
- * Resolve the session that owns a (channelId, threadTs) thread, creating one
- * bound to the *existing* channel if none exists. Uses `createThread: false`
- * so no new Slack channel is created — the thread root is the binding.
+ * Resolve the session that owns a (channelId, threadTs) thread. Prefers, in order:
+ * an in-memory meta, a live session by thread, then a PERSISTED record (post-restart)
+ * — in which case core.handleMessage(threadId) lazily resumes the agent. Only when no
+ * session exists at all does it create one bound to the *existing* channel
+ * (`createThread: false`, so no new Slack channel is created).
  */
 export async function resolveThreadSession(
   deps: ThreadSessionDeps,
   channelId: string,
   threadTs: string,
-  userId: string,
 ): Promise<{ sessionId: string; meta: SlackSessionMeta }> {
   const key = `${channelId}:${threadTs}`;
 
@@ -114,14 +116,24 @@ export async function resolveThreadSession(
     }
   }
 
-  const existing = deps.getSessionByThread("slack", key);
-  if (existing) {
+  const live = deps.getSessionByThread("slack", key);
+  if (live) {
     const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
-    deps.sessions.set(existing.id, meta);
-    return { sessionId: existing.id, meta };
+    deps.sessions.set(live.id, meta);
+    return { sessionId: live.id, meta };
   }
 
-  const session = await deps.handleNewSession("slack", userId, undefined, { createThread: false });
+  // Persisted (post-restart): bind meta to the stored session and let
+  // core.handleMessage(threadId=key) lazily resume it. Do NOT create a new
+  // session — that would orphan the stored one and lose its agent context.
+  const record = deps.getRecordByThread("slack", key);
+  if (record) {
+    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
+    deps.sessions.set(record.sessionId, meta);
+    return { sessionId: record.sessionId, meta };
+  }
+
+  const session = await deps.handleNewSession("slack", undefined, undefined, { createThread: false });
   const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
   deps.sessions.set(session.id, meta);
   (session as { threadId?: string }).threadId = key;
