@@ -160,6 +160,19 @@ describe("SlackPermissionHandler", () => {
     }));
   });
 
+  it("cleanupRequest removes only the given request, not sibling threads sharing a channel", async () => {
+    const enqueue = vi.fn().mockResolvedValue({});
+    const queue = { enqueue } as any;
+    const handler = new SlackPermissionHandler(queue, vi.fn());
+    handler.trackPendingMessage("req-A", "C_SUB", "1.1", []);
+    handler.trackPendingMessage("req-B", "C_SUB", "2.2", []);
+
+    await handler.cleanupRequest("req-A");
+
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith("chat.update", expect.objectContaining({ channel: "C_SUB", ts: "1.1" }));
+  });
+
   it("handles missing message in body gracefully (no crash when body.message is undefined)", async () => {
     const onResponse = vi.fn();
     const queue = makeMockQueue();

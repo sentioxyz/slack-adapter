@@ -28,6 +28,8 @@ export interface SlackActivityTrackerConfig {
   outputMode: OutputMode;
   tunnelService?: TunnelServiceInterface;
   sessionContext?: { id: string; workingDirectory: string };
+  /** Outer thread root for subscribed channels — roots the main message in that thread. */
+  threadTs?: string;
 }
 
 export class SlackActivityTracker {
@@ -37,6 +39,7 @@ export class SlackActivityTracker {
   private outputMode: OutputMode;
   private tunnelService?: TunnelServiceInterface;
   private sessionContext?: { id: string; workingDirectory: string };
+  private rootThreadTs?: string;
 
   private toolStateMap = new ToolStateMap();
   private specBuilder: DisplaySpecBuilder;
@@ -60,6 +63,7 @@ export class SlackActivityTracker {
     this.outputMode = config.outputMode;
     this.tunnelService = config.tunnelService;
     this.sessionContext = config.sessionContext;
+    this.rootThreadTs = config.threadTs;
     this.specBuilder = new DisplaySpecBuilder(config.tunnelService);
   }
 
@@ -101,6 +105,7 @@ export class SlackActivityTracker {
       "chat.postMessage",
       {
         channel: this.channelId,
+        ...(this.rootThreadTs ? { thread_ts: this.rootThreadTs } : {}),
         blocks,
         text: "Processing...",
       },
@@ -108,7 +113,7 @@ export class SlackActivityTracker {
 
     const turn: TurnState = {
       mainMessageTs: result.ts,
-      threadTs: result.ts,
+      threadTs: this.rootThreadTs ?? result.ts,
       isFinalized: false,
     };
     this.turn = turn;
@@ -335,13 +340,14 @@ export class SlackActivityTracker {
           "chat.postMessage",
           {
             channel: this.channelId,
+            ...(this.rootThreadTs ? { thread_ts: this.rootThreadTs } : {}),
             blocks,
             text: isComplete ? "Done" : "Processing...",
           },
         );
         if (result?.ts) {
           this.turn.mainMessageTs = result.ts;
-          this.turn.threadTs = result.ts;
+          this.turn.threadTs = this.rootThreadTs ?? result.ts;
         }
       } catch {
         // Give up silently

@@ -28,14 +28,36 @@ export const SlackChannelConfigSchema = z.object({
   channelPrefix: z.string().default("openacp"),
   autoCreateSession: z.boolean().default(true),
   startupChannelId: z.string().optional(),
+  subscribedChannels: z
+    .array(
+      z.object({
+        channelId: z.string(),
+        trigger: z.enum(["mention", "all"]).default("mention"),
+      }),
+    )
+    .default([]),
+  /**
+   * When true, the bot responds to @mentions in ANY channel it has been invited
+   * to, without that channel being listed in `subscribedChannels`. Explicit
+   * entries still take precedence (e.g. to use `trigger: "all"` for a channel).
+   */
+  mentionAnyChannel: z.boolean().default(false),
+  /**
+   * When true (default), the bot treats a direct message as its own persistent
+   * session and replies inline in the DM. The allowedUserIds allowlist still
+   * gates who may start a DM session. Set false to ignore DMs entirely.
+   */
+  respondToDms: z.boolean().default(true),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
 
 // Per-session metadata stored in SessionRecord.platform
 export interface SlackSessionMeta {
-  channelId: string;     // Slack channel ID for this session (C...)
-  channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9"
+  channelId: string;     // Slack channel ID for this session (C… for channels, D… for DMs)
+  channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9", or "C123:169..." for subscription threads
+  /** Slack thread root (parent message ts) when this session is bound to a subscribed channel thread. */
+  threadTs?: string;
 }
 
 /** Minimal file metadata extracted from Slack message events (subtype: file_share) */

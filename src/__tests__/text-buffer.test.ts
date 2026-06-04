@@ -6,7 +6,7 @@ describe("SlackTextBuffer", () => {
     const mockQueue = {
       enqueue: vi.fn().mockResolvedValue({}),
     } as any;
-    const buf = new SlackTextBuffer("C123", "sess1", mockQueue);
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", mockQueue);
 
     buf.append("Hello ");
     buf.append("world");
@@ -20,7 +20,7 @@ describe("SlackTextBuffer", () => {
 
   it("does not post empty content", async () => {
     const mockQueue = { enqueue: vi.fn().mockResolvedValue({}) } as any;
-    const buf = new SlackTextBuffer("C123", "sess1", mockQueue);
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", mockQueue);
     await buf.flush();
     expect(mockQueue.enqueue).not.toHaveBeenCalled();
   });
@@ -32,7 +32,7 @@ describe("SlackTextBuffer", () => {
         () => new Promise<void>(r => { resolvers.push(r); }),
       ),
     } as any;
-    const buf = new SlackTextBuffer("C123", "sess1", mockQueue);
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", mockQueue);
 
     buf.append("first");
     const flushPromise = buf.flush(); // starts flush, blocks on first enqueue
@@ -77,7 +77,7 @@ describe("SlackTextBuffer", () => {
       }),
     };
 
-    const buf = new SlackTextBuffer("C123", "sess-1", mockQueue as any);
+    const buf = new SlackTextBuffer("C123", undefined, "sess-1", mockQueue as any);
     buf.append("hello ");
 
     // Start flush1 — this blocks on firstCallPromise
@@ -118,11 +118,23 @@ describe("SlackTextBuffer", () => {
 
   it("destroy clears buffer and timer", async () => {
     const mockQueue = { enqueue: vi.fn().mockResolvedValue({}) } as any;
-    const buf = new SlackTextBuffer("C123", "sess1", mockQueue);
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", mockQueue);
     buf.append("text");
     buf.destroy();
     // After destroy, flush should not post anything
     await buf.flush();
     expect(mockQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("includes thread_ts on posts when constructed with a thread", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "1.1" });
+    const queue = { enqueue } as any;
+    const buf = new SlackTextBuffer("C_SUB", "169.1", "sess-1", queue);
+    buf.append("hello world");
+    await buf.flush();
+    expect(enqueue).toHaveBeenCalledWith(
+      "chat.postMessage",
+      expect.objectContaining({ channel: "C_SUB", thread_ts: "169.1" }),
+    );
   });
 });

@@ -19,6 +19,7 @@ export class SlackTextBuffer {
 
   constructor(
     private channelId: string,
+    private threadTs: string | undefined,
     private sessionId: string,
     private queue: ISlackSendQueue,
     logger?: Logger,
@@ -55,6 +56,7 @@ export class SlackTextBuffer {
           if (!chunk.trim()) continue;
           const result = await this.queue.enqueue("chat.postMessage", {
             channel: this.channelId,
+            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
             text: chunk,
             blocks: [{ type: "section", text: { type: "mrkdwn", text: chunk } }],
           });

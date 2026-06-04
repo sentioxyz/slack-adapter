@@ -41,6 +41,7 @@ Add to your `~/.openacp/config.json`:
 | `allowedUserIds` | Optional. Restrict access to specific Slack user IDs |
 | `autoCreateSession` | Create a startup session on boot. Default: `true` |
 | `outputMode` | Default verbosity: `"low"`, `"medium"`, or `"high"`. Default: `"medium"` |
+| `subscribedChannels` | Optional. Channels to watch: `[{ "channelId": "C...", "trigger": "mention" \| "all" }]`. Invite the bot to each. Default: `[]` |
 
 ### Output Mode
 
@@ -51,6 +52,26 @@ The adapter renders agent activity in real time using Slack threads:
 - **High** 🔍 — full detail: tool input/output, diffs, viewer links, thinking in thread
 
 Change the mode on the fly with `/outputmode low|medium|high`, or open an interactive modal with `/outputmode`. Requires the slash command to be registered in the Slack app settings — see the [setup guide](https://docs.openacp.dev/platform-setup/slack).
+
+### Channel Subscription
+
+Beyond the per-session channels the bot creates, you can point it at **existing**
+channels. Invite the bot to the channel and list it under `subscribedChannels`:
+
+```json
+"subscribedChannels": [
+  { "channelId": "C0123ABCD", "trigger": "mention" }
+]
+```
+
+- `trigger: "mention"` (default) — the bot starts a session only when a top-level
+  message `@mentions` it.
+- `trigger: "all"` — every top-level message starts a session.
+
+Each top-level trigger opens a **thread**; the agent works and replies inside that
+thread, and any reply in the thread continues the same session (with full context).
+Tool-permission requests appear as buttons in the thread. The bot never archives a
+subscribed channel.
 
 ## Development
 

@@ -36,6 +36,7 @@ import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
+import { resolveThreadSession, resolveDmSession } from "./subscription-router.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -129,6 +130,14 @@ export function makeArchiveCommandHandler(deps: ArchiveCommandDeps) {
       });
       return;
     }
+    if (found.meta.threadTs) {
+      await deps.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: "This is a subscribed channel — OpenACP will not archive it.",
+      });
+      return;
+    }
     // Send the ephemeral confirmation BEFORE archiving — Slack rejects
     // chat.postEphemeral against an archived channel with `is_archived`,
     // and the user would lose the confirmation message.
@@ -159,12 +168,13 @@ interface CoreKernel {
       permissionGate: { requestId: string; resolve(optionId: string): void };
     } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
+    getRecordByThread(platform: string, threadId: string): { sessionId: string } | undefined;
     getSessionRecord(id: string): { platform?: Record<string, unknown> } | undefined;
     patchRecord(id: string, patch: Record<string, unknown>): Promise<void>;
   };
   fileService: FileServiceInterface;
   handleMessage(msg: { channelId: string; threadId: string; userId: string; text: string; attachments?: Attachment[] }): Promise<void>;
-  handleNewSession(platform: string, userId?: string, text?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
+  handleNewSession(platform: string, agentName?: string, workspacePath?: string, opts?: { createThread: boolean }): Promise<{ id: string; threadId?: string }>;
   eventBus?: {
     // Loosely typed to support different event payload shapes (threadReady,
     // configChanged, …). Cast in the handler.
@@ -196,6 +206,8 @@ export class SlackAdapter extends MessagingAdapter {
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
   private _dispatchQueues = new Map<string, Promise<void>>();
+  /** In-flight DM session resolution per DM channel, to coalesce concurrent first messages. */
+  private _dmResolveQueue = new Map<string, Promise<{ sessionId: string; meta: SlackSessionMeta }>>();
   /** Message `ts` of the skill commands card per session, for in-place edits */
   private _skillCommandsTs = new Map<string, string>();
   /** Commands queued before a session channel was ready */
@@ -382,49 +394,12 @@ export class SlackAdapter extends MessagingAdapter {
     this.eventRouter = new SlackEventRouter(
       (slackChannelId) => {
         for (const meta of this.sessions.values()) {
-          if (meta.channelId === slackChannelId) return meta;
+          if (meta.channelId === slackChannelId && !meta.threadTs) return meta;
         }
         return undefined;
       },
-      async (sessionChannelSlug, text, userId, files) => {
-        const processFiles = async (): Promise<Attachment[] | undefined> => {
-          if (!files?.length) return undefined;
-          const audioFiles = files.filter((f) => isAudioClip(f));
-          if (!audioFiles.length) return undefined;
-
-          const attachments: Attachment[] = [];
-          for (const file of audioFiles) {
-            const buffer = await this.downloadSlackFile(file.url_private);
-            if (!buffer) continue;
-            const mimeType = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
-            const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
-            if (!sessionId) continue;
-            const att = await this.fileService.saveFile(sessionId, file.name, buffer, mimeType);
-            attachments.push(att);
-          }
-          return attachments.length > 0 ? attachments : undefined;
-        };
-
-        // CommandRegistry dispatch — intercept /commands before sending to agent
-        if (text.startsWith("/")) {
-          const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
-          if (handled) return;
-        }
-
-        processFiles()
-          .then((attachments) => {
-            this.core
-              .handleMessage({
-                channelId: "slack",
-                threadId: sessionChannelSlug,
-                userId,
-                text,
-                attachments,
-              })
-              .catch((err) => this.log.error({ err }, "handleMessage error"));
-          })
-          .catch((err) => this.log.error({ err }, "Failed to process audio files"));
-      },
+      (sessionChannelSlug, text, userId, files) =>
+        this.dispatchToSession(sessionChannelSlug, text, userId, files),
       this.botUserId,
       this.slackConfig.notificationChannelId,
       // onNewSession: create a new session with a private channel
@@ -473,7 +448,30 @@ export class SlackAdapter extends MessagingAdapter {
         }
       },
       this.slackConfig,
+      (channelId, threadTs) => this.hasThreadSession(channelId, threadTs),
+      // onSubscriptionMessage: bind the thread to a session and dispatch
+      async (channelId, threadTs, userId, text, files) => {
+        try {
+          const { meta } = await resolveThreadSession(
+            {
+              sessions: this.sessions,
+              getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
+              getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
+              handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
+              patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
+            },
+            channelId,
+            threadTs,
+          );
+          await this.dispatchToSession(meta.channelSlug, text, userId, files);
+        } catch (err) {
+          this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
+        }
+      },
       this.log,
+      // onDmSession: bind a session to the DM channel and dispatch
+      (dmChannelId, text, userId, files) =>
+        this.handleDmSession(dmChannelId, text, userId, files),
     );
     this.eventRouter.register(this.app);
 
@@ -756,16 +754,32 @@ export class SlackAdapter extends MessagingAdapter {
     if (!meta) return;
 
     try {
-      await this.permissionHandler.cleanupSession(meta.channelId);
+      if (meta.threadTs) {
+        const sess = this.core.sessionManager.getSession(sessionId);
+        const requestId = sess?.permissionGate?.requestId;
+        if (requestId) await this.permissionHandler.cleanupRequest(requestId);
+      } else {
+        await this.permissionHandler.cleanupSession(meta.channelId);
+      }
     } catch (err) {
       this.log.warn({ err, sessionId }, "Failed to clean up permission buttons");
     }
 
-    try {
-      await this.channelManager.archiveChannel(meta.channelId);
-      this.log.info({ sessionId, channelId: meta.channelId }, "Session channel archived");
-    } catch (err) {
-      this.log.warn({ err, sessionId }, "Failed to archive Slack channel");
+    if (meta.threadTs) {
+      // Subscription thread session: the channel is a real, shared business
+      // channel — never archive it. Only in-memory state is torn down below.
+      this.log.info({ sessionId, channelId: meta.channelId }, "Subscription thread ended (channel preserved)");
+    } else if (meta.channelId.startsWith("D")) {
+      // DM session: the channel is a direct message and cannot be archived —
+      // only tear down in-memory state below.
+      this.log.info({ sessionId, channelId: meta.channelId }, "DM session ended (channel preserved)");
+    } else {
+      try {
+        await this.channelManager.archiveChannel(meta.channelId);
+        this.log.info({ sessionId, channelId: meta.channelId }, "Session channel archived");
+      } catch (err) {
+        this.log.warn({ err, sessionId }, "Failed to archive Slack channel");
+      }
     }
     this.sessions.delete(sessionId);
     const buf = this.textBuffers.get(sessionId);
@@ -793,8 +807,21 @@ export class SlackAdapter extends MessagingAdapter {
     const def = registry.get(commandName);
     if (!def) return false; // not a registered command, let agent handle it
 
-    const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id ?? null;
-    const meta = sessionId ? this.getSessionMeta(sessionId) : undefined;
+    let sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id ?? null;
+    let meta = sessionId ? this.getSessionMeta(sessionId) : undefined;
+    // Subscription sessions register their meta in this.sessions (keyed by the
+    // resolved session id) before the agent is live. Fall back to that map by
+    // slug so a /command as the first post-restart reply still resolves its
+    // session and threads its response correctly.
+    if (!meta) {
+      for (const [sid, m] of this.sessions) {
+        if (m.channelSlug === sessionChannelSlug) {
+          sessionId = sid;
+          meta = m;
+          break;
+        }
+      }
+    }
     const channelId = meta?.channelId;
 
     try {
@@ -841,6 +868,7 @@ export class SlackAdapter extends MessagingAdapter {
         if (replyText || replyBlocks) {
           await this.queue.enqueue("chat.postMessage", {
             channel: channelId,
+            ...(meta ? this.threadParams(meta) : {}),
             text: replyText,
             ...(replyBlocks && { blocks: replyBlocks }),
           });
@@ -852,6 +880,7 @@ export class SlackAdapter extends MessagingAdapter {
       if (channelId) {
         await this.queue.enqueue("chat.postMessage", {
           channel: channelId,
+          ...(meta ? this.threadParams(meta) : {}),
           text: `⚠️ Command failed: ${err instanceof Error ? err.message : String(err)}`,
         }).catch(() => {});
       }
@@ -873,10 +902,15 @@ export class SlackAdapter extends MessagingAdapter {
     return this.sessions.get(sessionId);
   }
 
-  private getTextBuffer(sessionId: string, channelId: string): SlackTextBuffer {
+  /** Spread into chat.postMessage params to thread output for subscription sessions. */
+  private threadParams(meta: SlackSessionMeta): { thread_ts?: string } {
+    return meta.threadTs ? { thread_ts: meta.threadTs } : {};
+  }
+
+  private getTextBuffer(sessionId: string, channelId: string, threadTs?: string): SlackTextBuffer {
     let buf = this.textBuffers.get(sessionId);
     if (!buf) {
-      buf = new SlackTextBuffer(channelId, sessionId, this.queue, this.log);
+      buf = new SlackTextBuffer(channelId, threadTs, sessionId, this.queue, this.log);
       this.textBuffers.set(sessionId, buf);
     }
     return buf;
@@ -911,6 +945,7 @@ export class SlackAdapter extends MessagingAdapter {
         outputMode: mode,
         tunnelService,
         sessionContext,
+        threadTs: this.getSessionMeta(sessionId)?.threadTs,
       });
       this.sessionTrackers.set(sessionId, tracker);
     } else {
@@ -928,6 +963,16 @@ export class SlackAdapter extends MessagingAdapter {
     return undefined;
   }
 
+  /** True if a session already owns (channelId, threadTs) — in memory, live, or persisted. */
+  private hasThreadSession(channelId: string, threadTs: string): boolean {
+    for (const meta of this.sessions.values()) {
+      if (meta.channelId === channelId && meta.threadTs === threadTs) return true;
+    }
+    const key = `${channelId}:${threadTs}`;
+    if (this.core.sessionManager.getSessionByThread("slack", key)) return true;
+    return !!this.core.sessionManager.getRecordByThread("slack", key);
+  }
+
   /**
    * Attempt to restore a session's Slack channel metadata from the persisted session record.
    *
@@ -940,6 +985,7 @@ export class SlackAdapter extends MessagingAdapter {
     const channelId = record?.platform?.channelId as string | undefined;
     // Startup reuse sessions use topicId; normal sessions use threadId
     const channelSlug = (record?.platform?.threadId ?? record?.platform?.topicId) as string | undefined;
+    const threadTs = record?.platform?.threadTs as string | undefined;
     if (!channelId || !channelSlug) return;
 
     try {
@@ -950,10 +996,86 @@ export class SlackAdapter extends MessagingAdapter {
       if (info?.channel?.is_archived) {
         await this.queue.enqueue("conversations.unarchive", { channel: channelId });
       }
-      this.sessions.set(sessionId, { channelId, channelSlug });
+      this.sessions.set(sessionId, { channelId, channelSlug, threadTs });
       this.log.info({ sessionId, channelId, channelSlug }, "Restored session channel from record after restart");
     } catch (err) {
       this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
+    }
+  }
+
+  /**
+   * Forward a user message to core for an existing session, identified by its
+   * threadId slug. Handles /command interception and audio attachments. Shared
+   * by the legacy event-router path and the channel-subscription path.
+   */
+  private async dispatchToSession(
+    sessionChannelSlug: string,
+    text: string,
+    userId: string,
+    files?: SlackFileInfo[],
+  ): Promise<void> {
+    const processFiles = async (): Promise<Attachment[] | undefined> => {
+      if (!files?.length) return undefined;
+      const audioFiles = files.filter((f) => isAudioClip(f));
+      if (!audioFiles.length) return undefined;
+
+      const attachments: Attachment[] = [];
+      for (const file of audioFiles) {
+        const buffer = await this.downloadSlackFile(file.url_private);
+        if (!buffer) continue;
+        const mimeType = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
+        const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
+        if (!sessionId) continue;
+        const att = await this.fileService.saveFile(sessionId, file.name, buffer, mimeType);
+        attachments.push(att);
+      }
+      return attachments.length > 0 ? attachments : undefined;
+    };
+
+    if (text.startsWith("/")) {
+      const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
+      if (handled) return;
+    }
+
+    const attachments = await processFiles().catch((err) => {
+      this.log.error({ err }, "Failed to process audio files");
+      return undefined;
+    });
+    await this.core
+      .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text, attachments })
+      .catch((err) => this.log.error({ err }, "handleMessage error"));
+  }
+
+  /**
+   * Handle a direct message: resolve (or create + bind) the session bound to
+   * this DM channel and dispatch the message to it. Replies post back to the
+   * DM channel inline (no threadTs), so the bot converses in the DM.
+   */
+  private async handleDmSession(
+    dmChannelId: string,
+    text: string,
+    userId: string,
+    files?: SlackFileInfo[],
+  ): Promise<void> {
+    try {
+      let pending = this._dmResolveQueue.get(dmChannelId);
+      if (!pending) {
+        pending = resolveDmSession(
+          {
+            sessions: this.sessions,
+            getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
+            getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
+            handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
+            patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
+          },
+          dmChannelId,
+        ).finally(() => this._dmResolveQueue.delete(dmChannelId));
+        this._dmResolveQueue.set(dmChannelId, pending);
+      }
+      const { meta } = await pending;
+      await this.dispatchToSession(meta.channelSlug, text, userId, files);
+    } catch (err) {
+      this.log.error({ err, dmChannelId, userId }, "Failed to handle DM session");
     }
   }
 
@@ -992,7 +1114,7 @@ export class SlackAdapter extends MessagingAdapter {
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) await tracker.onTextStart();
 
-    const buf = this.getTextBuffer(sessionId, meta.channelId);
+    const buf = this.getTextBuffer(sessionId, meta.channelId, meta.threadTs);
     buf.append(content.text ?? "");
   }
 
@@ -1018,6 +1140,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1048,6 +1171,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1068,6 +1192,7 @@ export class SlackAdapter extends MessagingAdapter {
       const mb = (content.attachment.size / 1024 / 1024).toFixed(1);
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: `⚠️ File too large for Slack (${mb}MB > 50MB limit): \`${content.attachment.fileName}\``,
       }).catch((err) => this.log.warn({ err, sessionId }, "Failed to post size-limit notice"));
       return;
@@ -1168,6 +1293,7 @@ export class SlackAdapter extends MessagingAdapter {
         } else {
           const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
             channel: meta.channelId,
+            ...this.threadParams(meta),
             text,
           });
           if (result?.ts) this._lastUsageTs.set(sessionId, result.ts);
@@ -1219,6 +1345,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
       });
@@ -1249,6 +1376,7 @@ export class SlackAdapter extends MessagingAdapter {
 
     await this.queue.enqueue("chat.postMessage", {
       channel: meta.channelId,
+      ...this.threadParams(meta),
       text: summary,
     });
   }
@@ -1268,6 +1396,7 @@ export class SlackAdapter extends MessagingAdapter {
     const text = `📋 Message queued (#${position} in line). Agent is processing the previous prompt.`;
     const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
       channel: meta.channelId,
+      ...this.threadParams(meta),
       text,
     });
     if (result?.ts) this._waitingNoticeTs.set(sessionId, result.ts);
@@ -1325,6 +1454,7 @@ export class SlackAdapter extends MessagingAdapter {
     try {
       const result = await this.queue.enqueue("chat.postMessage", {
         channel: meta.channelId,
+        ...this.threadParams(meta),
         text: `Permission request: ${request.description}`,
         blocks,
       });
@@ -1417,6 +1547,7 @@ export class SlackAdapter extends MessagingAdapter {
       } else {
         const result = await this.queue.enqueue<{ ts?: string }>("chat.postMessage", {
           channel: meta.channelId,
+          ...this.threadParams(meta),
           text,
           blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
         });

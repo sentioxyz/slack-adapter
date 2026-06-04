@@ -17,28 +17,12 @@ function createSlackPlugin(): OpenACPPlugin {
     permissions: ['services:register', 'kernel:access', 'events:read'],
 
     async install(ctx: InstallContext) {
-      const { terminal, settings, legacyConfig } = ctx
-
-      // Migrate from legacy config if present
-      if (legacyConfig) {
-        const ch = legacyConfig.channels as Record<string, unknown> | undefined
-        const slackCfg = ch?.slack as Record<string, unknown> | undefined
-        if (slackCfg?.botToken) {
-          await settings.setAll({
-            botToken: slackCfg.botToken,
-            appToken: slackCfg.appToken,
-            signingSecret: slackCfg.signingSecret ?? '',
-            channelPrefix: slackCfg.channelPrefix ?? 'openacp',
-            allowedUserIds: slackCfg.allowedUserIds ?? [],
-            autoCreateSession: slackCfg.autoCreateSession ?? true,
-            ...(slackCfg.notificationChannelId ? { notificationChannelId: slackCfg.notificationChannelId } : {}),
-          })
-          terminal.log.success('Slack settings migrated from legacy config')
-          return
-        }
-      }
-
-      // Interactive setup with manifest
+      // Interactive setup with manifest.
+      //
+      // NOTE: The legacy-config migration path was removed. OpenACP dropped
+      // `InstallContext.legacyConfig` in the 2026-04-05 config-legacy-removal,
+      // so it is no longer available to plugins (and there is no legacy config
+      // left to migrate from). Fresh installs go straight to the wizard.
       const { setupSlack } = await import('./setup.js')
       await setupSlack(ctx)
     },

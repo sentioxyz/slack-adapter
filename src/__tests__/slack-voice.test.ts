@@ -12,7 +12,7 @@ function createMockQueue(): ISlackSendQueue {
 describe("SlackTextBuffer.stripTtsBlock", () => {
   it("strips TTS block from unflushed buffer", async () => {
     const queue = createMockQueue();
-    const buf = new SlackTextBuffer("C1", "s1", queue);
+    const buf = new SlackTextBuffer("C1", undefined, "s1", queue);
 
     buf.append("Hello [TTS]speak this[/TTS]");
     await buf.stripTtsBlock();
@@ -26,7 +26,7 @@ describe("SlackTextBuffer.stripTtsBlock", () => {
 
   it("strips multiline TTS blocks from unflushed buffer", async () => {
     const queue = createMockQueue();
-    const buf = new SlackTextBuffer("C1", "s1", queue);
+    const buf = new SlackTextBuffer("C1", undefined, "s1", queue);
 
     buf.append("[TTS]line1\nline2\nline3[/TTS] end");
     await buf.stripTtsBlock();
@@ -39,7 +39,7 @@ describe("SlackTextBuffer.stripTtsBlock", () => {
 
   it("is a no-op when no TTS block present", async () => {
     const queue = createMockQueue();
-    const buf = new SlackTextBuffer("C1", "s1", queue);
+    const buf = new SlackTextBuffer("C1", undefined, "s1", queue);
 
     buf.append("Hello world");
     await buf.stripTtsBlock();
@@ -52,7 +52,7 @@ describe("SlackTextBuffer.stripTtsBlock", () => {
 
   it("edits already-posted message via chat.update when TTS was flushed", async () => {
     const queue = createMockQueue();
-    const buf = new SlackTextBuffer("C1", "s1", queue);
+    const buf = new SlackTextBuffer("C1", undefined, "s1", queue);
 
     buf.append("Hello world [TTS]speak this[/TTS]");
     await buf.flush(); // Flush posts the message with TTS block
@@ -72,7 +72,7 @@ describe("SlackTextBuffer.stripTtsBlock", () => {
 
   it("does not call chat.update when flushed message has no TTS block", async () => {
     const queue = createMockQueue();
-    const buf = new SlackTextBuffer("C1", "s1", queue);
+    const buf = new SlackTextBuffer("C1", undefined, "s1", queue);
 
     buf.append("Hello world");
     await buf.flush();

@@ -81,6 +81,34 @@ export async function validateSlackBotToken(
 export async function setupSlack(ctx: InstallContext): Promise<void> {
   const { terminal, settings } = ctx
 
+  // Non-interactive path: when the Slack credentials are supplied via the
+  // environment (e.g. `npm run setup` driven from a .env file, or CI), skip
+  // the interactive wizard entirely and persist them directly. This keeps the
+  // install hook scriptable; the interactive flow below is the fallback for
+  // humans configuring by hand.
+  const envBot = process.env.SLACK_BOT_TOKEN?.trim()
+  const envApp = process.env.SLACK_APP_TOKEN?.trim()
+  const envSigning = process.env.SLACK_SIGNING_SECRET?.trim()
+  if (envBot && envApp && envSigning) {
+    const envAllowed = (process.env.SLACK_ALLOWED_USER_IDS ?? '')
+      .split(',')
+      .map((uid) => uid.trim())
+      .filter(Boolean)
+    await settings.setAll({
+      botToken: envBot,
+      appToken: envApp,
+      signingSecret: envSigning,
+      allowedUserIds: envAllowed,
+      channelPrefix: process.env.SLACK_CHANNEL_PREFIX?.trim() || 'openacp',
+      autoCreateSession: true,
+      ...(process.env.SLACK_NOTIFICATION_CHANNEL_ID?.trim()
+        ? { notificationChannelId: process.env.SLACK_NOTIFICATION_CHANNEL_ID.trim() }
+        : {}),
+    })
+    terminal.log.success('Slack adapter configured from environment (non-interactive)')
+    return
+  }
+
   // Step 1: Show manifest
   const { manifest } = generateSlackManifest()
   const manifestJson = JSON.stringify(manifest, null, 2)
