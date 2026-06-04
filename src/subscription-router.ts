@@ -30,6 +30,13 @@ export interface SubscriptionContext {
    * so the bot responds to @mentions in every channel it has been invited to.
    */
   mentionAnyChannel?: boolean;
+  /**
+   * When true (default), treat a direct-message channel (`D…`) as a
+   * `trigger: "all"` subscription: every top-level DM starts its own threaded
+   * session and the bot replies in that thread, matching channel behavior. When
+   * false, DMs are ignored.
+   */
+  respondToDms?: boolean;
 }
 
 export type Classification =
@@ -62,19 +69,23 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
   if (msg.subtype && msg.subtype !== "file_share") return { kind: "ignore" };
 
   const channelId = msg.channel;
-  // Direct messages (D…) are handled by the dedicated DM-session path, never
-  // the subscription path — otherwise mentionAnyChannel would synthesize a
-  // mention-only sub and a DM containing "<@bot>" would start a thread session.
-  if (channelId.startsWith("D")) return { kind: "ignore" };
   const userId = msg.user ?? "";
   if (!userId || userId === ctx.botUserId) return { kind: "ignore" };
 
-  // Explicit subscription wins (it may set `trigger: "all"`); otherwise, when
-  // mentionAnyChannel is on, synthesize a mention-only sub so an @mention in any
-  // invited channel starts a thread. The mention-only mode means non-mention
-  // top-level messages and unrelated human threads are still ignored.
+  // Resolve the effective subscription. Explicit `subscribedChannels` entries
+  // win (they may set `trigger: "all"`). Otherwise:
+  //  - a direct message (`D…`) behaves as `trigger: "all"` so every top-level DM
+  //    starts a threaded session and the bot replies in that thread — matching
+  //    channel behavior. Gated by respondToDms (default on).
+  //  - mentionAnyChannel synthesizes a mention-only sub so an @mention in any
+  //    invited channel starts a thread.
   let sub = ctx.subscribedChannels.find((c) => c.channelId === channelId);
-  if (!sub && ctx.mentionAnyChannel) sub = { channelId, trigger: "mention" };
+  if (!sub && channelId.startsWith("D")) {
+    if (ctx.respondToDms === false) return { kind: "ignore" };
+    sub = { channelId, trigger: "all" };
+  } else if (!sub && ctx.mentionAnyChannel) {
+    sub = { channelId, trigger: "mention" };
+  }
   if (!sub) return { kind: "ignore" };
 
   if (ctx.allowedUserIds.length > 0 && !ctx.allowedUserIds.includes(userId)) {
@@ -153,50 +164,6 @@ export async function resolveThreadSession(
   (session as { threadId?: string }).threadId = key;
   await deps.patchRecord(session.id, {
     platform: { channelId, topicId: key, threadTs },
-  });
-  return { sessionId: session.id, meta };
-}
-
-/**
- * Resolve the session that owns a DM channel. Prefers, in order: an in-memory
- * meta, a live session by slug, then a PERSISTED record (post-restart). Only
- * when no session exists does it create one bound to the DM channel
- * (`createThread: false`, so no new Slack channel is created). The slug is
- * deterministic (`dm-<channelId>`) so a post-restart inbound DM can look the
- * session up by channel.
- */
-export async function resolveDmSession(
-  deps: ThreadSessionDeps,
-  dmChannelId: string,
-): Promise<{ sessionId: string; meta: SlackSessionMeta }> {
-  const slug = `dm-${dmChannelId}`;
-
-  for (const [sid, meta] of deps.sessions) {
-    if (meta.channelId === dmChannelId && !meta.threadTs) {
-      return { sessionId: sid, meta };
-    }
-  }
-
-  const live = deps.getSessionByThread("slack", slug);
-  if (live) {
-    const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
-    deps.sessions.set(live.id, meta);
-    return { sessionId: live.id, meta };
-  }
-
-  const record = deps.getRecordByThread("slack", slug);
-  if (record) {
-    const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
-    deps.sessions.set(record.sessionId, meta);
-    return { sessionId: record.sessionId, meta };
-  }
-
-  const session = await deps.handleNewSession("slack", undefined, undefined, { createThread: false });
-  const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
-  deps.sessions.set(session.id, meta);
-  (session as { threadId?: string }).threadId = slug;
-  await deps.patchRecord(session.id, {
-    platform: { channelId: dmChannelId, topicId: slug },
   });
   return { sessionId: session.id, meta };
 }

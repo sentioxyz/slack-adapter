@@ -270,67 +270,64 @@ describe("SlackEventRouter", () => {
     expect(onSubscription).not.toHaveBeenCalled();
   });
 
-  it("routes a DM from an allowed user to onDmSession", async () => {
+  it("routes a top-level DM to onSubscriptionMessage as a threaded session", async () => {
     const onIncoming = vi.fn();
     const onNewSession = vi.fn();
-    const onDmSession = vi.fn();
+    const onSubscription = vi.fn();
     const sessionLookup = vi.fn().mockReturnValue(undefined);
     const router = new SlackEventRouter(
       sessionLookup, onIncoming, "BOT1", "NOTIF", onNewSession,
-      makeConfig(), undefined, undefined, undefined, onDmSession,
+      makeConfig(), () => false, onSubscription,
     );
     const app = createMockApp();
     router.register(app as any);
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "hello", ts: "1.1" } });
 
-    expect(onDmSession).toHaveBeenCalledWith("D123", "hello", "U1", undefined);
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "hello", undefined);
     expect(onNewSession).not.toHaveBeenCalled();
     expect(onIncoming).not.toHaveBeenCalled();
   });
 
-  it("does not route DMs when respondToDms is false", async () => {
-    const onDmSession = vi.fn();
+  it("continues a known DM thread reply via onSubscriptionMessage", async () => {
+    const onSubscription = vi.fn();
     const router = new SlackEventRouter(
       vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
-      makeConfig({ respondToDms: false }), undefined, undefined, undefined, onDmSession,
+      makeConfig(), () => true, onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "D123", user: "U1", text: "more", ts: "1.2", thread_ts: "1.1" } });
+
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "more", undefined);
+  });
+
+  it("does not route DMs when respondToDms is false", async () => {
+    const onSubscription = vi.fn();
+    const router = new SlackEventRouter(
+      vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
+      makeConfig({ respondToDms: false }), () => false, onSubscription,
     );
     const app = createMockApp();
     router.register(app as any);
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "hello", ts: "1.1" } });
 
-    expect(onDmSession).not.toHaveBeenCalled();
+    expect(onSubscription).not.toHaveBeenCalled();
   });
 
   it("does not route a DM from a non-allowed user", async () => {
-    const onDmSession = vi.fn();
+    const onSubscription = vi.fn();
     const router = new SlackEventRouter(
       vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
-      makeConfig({ allowedUserIds: ["U_ALLOWED"] }), undefined, undefined, undefined, onDmSession,
+      makeConfig({ allowedUserIds: ["U_ALLOWED"] }), () => false, onSubscription,
     );
     const app = createMockApp();
     router.register(app as any);
 
     await app._trigger("message", { message: { channel: "D123", user: "U_NOT_ALLOWED", text: "hello", ts: "1.1" } });
 
-    expect(onDmSession).not.toHaveBeenCalled();
-  });
-
-  it("routes a follow-up DM with an existing session via sessionLookup, not onDmSession", async () => {
-    const onIncoming = vi.fn();
-    const onDmSession = vi.fn();
-    const sessionLookup = vi.fn().mockReturnValue({ channelId: "D123", channelSlug: "dm-D123" });
-    const router = new SlackEventRouter(
-      sessionLookup, onIncoming, "BOT1", "NOTIF", vi.fn(),
-      makeConfig(), undefined, undefined, undefined, onDmSession,
-    );
-    const app = createMockApp();
-    router.register(app as any);
-
-    await app._trigger("message", { message: { channel: "D123", user: "U1", text: "again", ts: "1.2" } });
-
-    expect(onIncoming).toHaveBeenCalledWith("dm-D123", "again", "U1", undefined);
-    expect(onDmSession).not.toHaveBeenCalled();
+    expect(onSubscription).not.toHaveBeenCalled();
   });
 });
