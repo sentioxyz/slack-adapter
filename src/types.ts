@@ -54,7 +54,7 @@ export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
 
 // Per-session metadata stored in SessionRecord.platform
 export interface SlackSessionMeta {
-  channelId: string;     // Slack channel ID for this session (C...)
+  channelId: string;     // Slack channel ID for this session (C… for channels, D… for DMs)
   channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9", or "C123:169..." for subscription threads
   /** Slack thread root (parent message ts) when this session is bound to a subscribed channel thread. */
   threadTs?: string;

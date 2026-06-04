@@ -206,6 +206,8 @@ export class SlackAdapter extends MessagingAdapter {
   private modalHandler = new SlackModalHandler();
   private sessionTrackers = new Map<string, SlackActivityTracker>();
   private _dispatchQueues = new Map<string, Promise<void>>();
+  /** In-flight DM session resolution per DM channel, to coalesce concurrent first messages. */
+  private _dmResolveQueue = new Map<string, Promise<{ sessionId: string; meta: SlackSessionMeta }>>();
   /** Message `ts` of the skill commands card per session, for in-place edits */
   private _skillCommandsTs = new Map<string, string>();
   /** Commands queued before a session channel was ready */
@@ -767,6 +769,10 @@ export class SlackAdapter extends MessagingAdapter {
       // Subscription thread session: the channel is a real, shared business
       // channel — never archive it. Only in-memory state is torn down below.
       this.log.info({ sessionId, channelId: meta.channelId }, "Subscription thread ended (channel preserved)");
+    } else if (meta.channelId.startsWith("D")) {
+      // DM session: the channel is a direct message and cannot be archived —
+      // only tear down in-memory state below.
+      this.log.info({ sessionId, channelId: meta.channelId }, "DM session ended (channel preserved)");
     } else {
       try {
         await this.channelManager.archiveChannel(meta.channelId);
@@ -1052,16 +1058,21 @@ export class SlackAdapter extends MessagingAdapter {
     files?: SlackFileInfo[],
   ): Promise<void> {
     try {
-      const { meta } = await resolveDmSession(
-        {
-          sessions: this.sessions,
-          getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
-          getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
-          handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
-          patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
-        },
-        dmChannelId,
-      );
+      let pending = this._dmResolveQueue.get(dmChannelId);
+      if (!pending) {
+        pending = resolveDmSession(
+          {
+            sessions: this.sessions,
+            getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
+            getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
+            handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
+            patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
+          },
+          dmChannelId,
+        ).finally(() => this._dmResolveQueue.delete(dmChannelId));
+        this._dmResolveQueue.set(dmChannelId, pending);
+      }
+      const { meta } = await pending;
       await this.dispatchToSession(meta.channelSlug, text, userId, files);
     } catch (err) {
       this.log.error({ err, dmChannelId, userId }, "Failed to handle DM session");
