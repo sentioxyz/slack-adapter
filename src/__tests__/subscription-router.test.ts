@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { classifySubscription } from "../subscription-router.js";
 import type { SubscriptionContext } from "../subscription-router.js";
-import { resolveThreadSession } from "../subscription-router.js";
+import { resolveThreadSession, resolveDmSession } from "../subscription-router.js";
 import type { ThreadSessionDeps } from "../subscription-router.js";
 import type { SlackSessionMeta } from "../types.js";
 
@@ -131,6 +131,45 @@ describe("resolveThreadSession", () => {
     expect(d.sessions.get("sess-new")).toEqual(r.meta);
     expect(d.patchRecord).toHaveBeenCalledWith("sess-new", {
       platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1" },
+    });
+  });
+});
+
+describe("resolveDmSession", () => {
+  it("reuses an in-memory session bound to the DM channel", async () => {
+    const sessions = new Map<string, SlackSessionMeta>([
+      ["sess-1", { channelId: "D123", channelSlug: "dm-D123" }],
+    ]);
+    const d = deps({ sessions });
+    const r = await resolveDmSession(d, "D123");
+    expect(r.sessionId).toBe("sess-1");
+    expect(d.handleNewSession).not.toHaveBeenCalled();
+  });
+
+  it("binds to a live session found by slug without creating a new one", async () => {
+    const d = deps({ getSessionByThread: () => ({ id: "sess-live" }) });
+    const r = await resolveDmSession(d, "D123");
+    expect(r.sessionId).toBe("sess-live");
+    expect(d.sessions.get("sess-live")).toEqual({ channelId: "D123", channelSlug: "dm-D123" });
+    expect(d.handleNewSession).not.toHaveBeenCalled();
+  });
+
+  it("restores a PERSISTED session after restart (via getRecordByThread) without creating a new one", async () => {
+    const d = deps({ getRecordByThread: () => ({ sessionId: "sess-persisted" }) });
+    const r = await resolveDmSession(d, "D123");
+    expect(r.sessionId).toBe("sess-persisted");
+    expect(d.sessions.get("sess-persisted")).toEqual({ channelId: "D123", channelSlug: "dm-D123" });
+    expect(d.handleNewSession).not.toHaveBeenCalled();
+  });
+
+  it("creates a new session bound to the DM channel and persists platform fields", async () => {
+    const d = deps();
+    const r = await resolveDmSession(d, "D123");
+    expect(d.handleNewSession).toHaveBeenCalledWith("slack", undefined, undefined, { createThread: false });
+    expect(r.meta).toEqual({ channelId: "D123", channelSlug: "dm-D123" });
+    expect(d.sessions.get("sess-new")).toEqual(r.meta);
+    expect(d.patchRecord).toHaveBeenCalledWith("sess-new", {
+      platform: { channelId: "D123", topicId: "dm-D123" },
     });
   });
 });

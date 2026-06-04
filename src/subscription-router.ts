@@ -156,3 +156,47 @@ export async function resolveThreadSession(
   });
   return { sessionId: session.id, meta };
 }
+
+/**
+ * Resolve the session that owns a DM channel. Prefers, in order: an in-memory
+ * meta, a live session by slug, then a PERSISTED record (post-restart). Only
+ * when no session exists does it create one bound to the DM channel
+ * (`createThread: false`, so no new Slack channel is created). The slug is
+ * deterministic (`dm-<channelId>`) so a post-restart inbound DM can look the
+ * session up by channel.
+ */
+export async function resolveDmSession(
+  deps: ThreadSessionDeps,
+  dmChannelId: string,
+): Promise<{ sessionId: string; meta: SlackSessionMeta }> {
+  const slug = `dm-${dmChannelId}`;
+
+  for (const [sid, meta] of deps.sessions) {
+    if (meta.channelId === dmChannelId && !meta.threadTs) {
+      return { sessionId: sid, meta };
+    }
+  }
+
+  const live = deps.getSessionByThread("slack", slug);
+  if (live) {
+    const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
+    deps.sessions.set(live.id, meta);
+    return { sessionId: live.id, meta };
+  }
+
+  const record = deps.getRecordByThread("slack", slug);
+  if (record) {
+    const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
+    deps.sessions.set(record.sessionId, meta);
+    return { sessionId: record.sessionId, meta };
+  }
+
+  const session = await deps.handleNewSession("slack", undefined, undefined, { createThread: false });
+  const meta: SlackSessionMeta = { channelId: dmChannelId, channelSlug: slug };
+  deps.sessions.set(session.id, meta);
+  (session as { threadId?: string }).threadId = slug;
+  await deps.patchRecord(session.id, {
+    platform: { channelId: dmChannelId, topicId: slug },
+  });
+  return { sessionId: session.id, meta };
+}
