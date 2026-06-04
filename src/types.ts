@@ -42,6 +42,12 @@ export const SlackChannelConfigSchema = z.object({
    * entries still take precedence (e.g. to use `trigger: "all"` for a channel).
    */
   mentionAnyChannel: z.boolean().default(false),
+  /**
+   * When true (default), the bot treats a direct message as its own persistent
+   * session and replies inline in the DM. The allowedUserIds allowlist still
+   * gates who may start a DM session. Set false to ignore DMs entirely.
+   */
+  respondToDms: z.boolean().default(true),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
