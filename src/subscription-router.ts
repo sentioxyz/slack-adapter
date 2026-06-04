@@ -62,6 +62,10 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
   if (msg.subtype && msg.subtype !== "file_share") return { kind: "ignore" };
 
   const channelId = msg.channel;
+  // Direct messages (D…) are handled by the dedicated DM-session path, never
+  // the subscription path — otherwise mentionAnyChannel would synthesize a
+  // mention-only sub and a DM containing "<@bot>" would start a thread session.
+  if (channelId.startsWith("D")) return { kind: "ignore" };
   const userId = msg.user ?? "";
   if (!userId || userId === ctx.botUserId) return { kind: "ignore" };
 

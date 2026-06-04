@@ -75,6 +75,14 @@ describe("classifySubscription", () => {
     );
     expect(r.kind).toBe("ignore");
   });
+
+  it("ignores direct-message channels even with mentionAnyChannel and a mention", () => {
+    const r = classifySubscription(
+      { channel: "D123", user: "U1", text: "<@BOT1> hi", ts: "1.1" },
+      ctx({ subscribedChannels: [], mentionAnyChannel: true }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
 });
 
 function deps(overrides: Partial<ThreadSessionDeps> = {}): ThreadSessionDeps {
