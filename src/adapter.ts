@@ -36,7 +36,7 @@ import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { isAudioClip } from "./utils.js";
-import { resolveThreadSession } from "./subscription-router.js";
+import { resolveThreadSession, resolveDmSession } from "./subscription-router.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -467,6 +467,9 @@ export class SlackAdapter extends MessagingAdapter {
         }
       },
       this.log,
+      // onDmSession: bind a session to the DM channel and dispatch
+      (dmChannelId, text, userId, files) =>
+        this.handleDmSession(dmChannelId, text, userId, files),
     );
     this.eventRouter.register(this.app);
 
@@ -1035,6 +1038,34 @@ export class SlackAdapter extends MessagingAdapter {
     await this.core
       .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text, attachments })
       .catch((err) => this.log.error({ err }, "handleMessage error"));
+  }
+
+  /**
+   * Handle a direct message: resolve (or create + bind) the session bound to
+   * this DM channel and dispatch the message to it. Replies post back to the
+   * DM channel inline (no threadTs), so the bot converses in the DM.
+   */
+  private async handleDmSession(
+    dmChannelId: string,
+    text: string,
+    userId: string,
+    files?: SlackFileInfo[],
+  ): Promise<void> {
+    try {
+      const { meta } = await resolveDmSession(
+        {
+          sessions: this.sessions,
+          getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
+          getRecordByThread: (p, t) => this.core.sessionManager.getRecordByThread(p, t),
+          handleNewSession: (p, a, w, o) => this.core.handleNewSession(p, a, w, o),
+          patchRecord: (sid, patch) => this.core.sessionManager.patchRecord(sid, patch),
+        },
+        dmChannelId,
+      );
+      await this.dispatchToSession(meta.channelSlug, text, userId, files);
+    } catch (err) {
+      this.log.error({ err, dmChannelId, userId }, "Failed to handle DM session");
+    }
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
