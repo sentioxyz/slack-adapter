@@ -40,6 +40,14 @@ export type SubscriptionMessageCallback = (
   files?: SlackFileInfo[],
 ) => void | Promise<void>;
 
+// Callback to start/continue a session bound to a DM channel
+export type DmSessionCallback = (
+  dmChannelId: string,
+  text: string,
+  userId: string,
+  files?: SlackFileInfo[],
+) => void | Promise<void>;
+
 export interface ISlackEventRouter {
   register(app: App): void;
 }
@@ -57,6 +65,7 @@ export class SlackEventRouter implements ISlackEventRouter {
     private hasThreadSession?: (channelId: string, threadTs: string) => boolean,
     private onSubscriptionMessage?: SubscriptionMessageCallback,
     logger?: Logger,
+    private onDmSession?: DmSessionCallback,
   ) {
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   }
@@ -144,8 +153,12 @@ export class SlackEventRouter implements ISlackEventRouter {
       }
 
       if (channelId.startsWith("D")) {
-        this.log.debug({ channelId, userId }, "DM received, creating new session");
-        this.onNewSession(text, userId);
+        if (this.config.respondToDms === false) {
+          this.log.debug({ channelId, userId }, "DM ignored (respondToDms disabled)");
+          return;
+        }
+        this.log.debug({ channelId, userId }, "DM received, routing to DM session");
+        await this.onDmSession?.(channelId, text, userId, files);
         return;
       }
     });
