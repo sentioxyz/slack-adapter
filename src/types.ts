@@ -36,6 +36,12 @@ export const SlackChannelConfigSchema = z.object({
       }),
     )
     .default([]),
+  /**
+   * When true, the bot responds to @mentions in ANY channel it has been invited
+   * to, without that channel being listed in `subscribedChannels`. Explicit
+   * entries still take precedence (e.g. to use `trigger: "all"` for a channel).
+   */
+  mentionAnyChannel: z.boolean().default(false),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;

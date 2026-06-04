@@ -25,6 +25,11 @@ export interface SubscriptionContext {
   allowedUserIds: string[];
   /** True if a session already owns (channelId, threadTs) — in memory or persisted. */
   hasThreadSession: (channelId: string, threadTs: string) => boolean;
+  /**
+   * When true, treat any channel not in `subscribedChannels` as mention-triggered,
+   * so the bot responds to @mentions in every channel it has been invited to.
+   */
+  mentionAnyChannel?: boolean;
 }
 
 export type Classification =
@@ -60,7 +65,12 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
   const userId = msg.user ?? "";
   if (!userId || userId === ctx.botUserId) return { kind: "ignore" };
 
-  const sub = ctx.subscribedChannels.find((c) => c.channelId === channelId);
+  // Explicit subscription wins (it may set `trigger: "all"`); otherwise, when
+  // mentionAnyChannel is on, synthesize a mention-only sub so an @mention in any
+  // invited channel starts a thread. The mention-only mode means non-mention
+  // top-level messages and unrelated human threads are still ignored.
+  let sub = ctx.subscribedChannels.find((c) => c.channelId === channelId);
+  if (!sub && ctx.mentionAnyChannel) sub = { channelId, trigger: "mention" };
   if (!sub) return { kind: "ignore" };
 
   if (ctx.allowedUserIds.length > 0 && !ctx.allowedUserIds.includes(userId)) {

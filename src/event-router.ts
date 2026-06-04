@@ -100,6 +100,7 @@ export class SlackEventRouter implements ISlackEventRouter {
           botUserId: this.botUserId,
           allowedUserIds: this.config.allowedUserIds ?? [],
           hasThreadSession: this.hasThreadSession ?? (() => false),
+          mentionAnyChannel: this.config.mentionAnyChannel ?? false,
         },
       );
       if (cls.kind !== "ignore") {
