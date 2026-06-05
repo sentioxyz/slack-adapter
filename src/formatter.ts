@@ -49,6 +49,16 @@ function context(text: string): KnownBlock {
   return { type: "context", elements: [{ type: "mrkdwn", text }] };
 }
 
+// Slack caps button labels at 75 chars — a longer label rejects the whole
+// message with invalid_blocks, so the permission prompt never reaches Slack.
+const BUTTON_LABEL_LIMIT = 75;
+
+function buttonLabel(label: string): string {
+  return label.length > BUTTON_LABEL_LIMIT
+    ? `${label.slice(0, BUTTON_LABEL_LIMIT - 1)}…`
+    : label;
+}
+
 export class SlackFormatter implements ISlackFormatter {
   formatOutgoing(message: OutgoingMessage): KnownBlock[] {
     switch (message.type) {
@@ -86,7 +96,7 @@ export class SlackFormatter implements ISlackFormatter {
         block_id: `perm_${req.id}`,
         elements: req.options.map(opt => ({
           type: "button" as const,
-          text: { type: "plain_text" as const, text: opt.label, emoji: true },
+          text: { type: "plain_text" as const, text: buttonLabel(opt.label), emoji: true },
           value: `${req.id}:${opt.id}`,
           action_id: `perm_action_${opt.id}_${req.id}`,
           style: (opt.isAllow ? "primary" : "danger") as "primary" | "danger",
