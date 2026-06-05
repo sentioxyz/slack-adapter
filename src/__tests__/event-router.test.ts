@@ -230,7 +230,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> hi", ts: "169.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined);
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: undefined });
     expect(onIncoming).not.toHaveBeenCalled();
     expect(onNewSession).not.toHaveBeenCalled();
   });
@@ -248,7 +248,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "more", ts: "169.2", thread_ts: "169.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "more", undefined);
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "more", undefined, undefined);
   });
 
   it("leaves legacy routing unchanged for non-subscribed channels", async () => {
@@ -284,7 +284,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "hello", ts: "1.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "hello", undefined);
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "hello", undefined, { midThread: undefined, triggerTs: undefined });
     expect(onNewSession).not.toHaveBeenCalled();
     expect(onIncoming).not.toHaveBeenCalled();
   });
@@ -300,7 +300,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "more", ts: "1.2", thread_ts: "1.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "more", undefined);
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "more", undefined, undefined);
   });
 
   it("does not route DMs when respondToDms is false", async () => {
@@ -315,6 +315,38 @@ describe("SlackEventRouter", () => {
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "hello", ts: "1.1" } });
 
     expect(onSubscription).not.toHaveBeenCalled();
+  });
+
+  it("plumbs midThread/triggerTs opts through for a mid-thread mention in an unknown thread", async () => {
+    const onSubscription = vi.fn();
+    const router = new SlackEventRouter(
+      vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
+      makeConfig({ subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+      () => false,
+      onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> help", ts: "169.5", thread_ts: "169.1" } });
+
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "help", undefined, { midThread: true, triggerTs: "169.5" });
+  });
+
+  it("does not pass mid-thread opts for a top-level mention", async () => {
+    const onSubscription = vi.fn();
+    const router = new SlackEventRouter(
+      vi.fn().mockReturnValue(undefined), vi.fn(), "BOT1", "NOTIF", vi.fn(),
+      makeConfig({ subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+      () => false,
+      onSubscription,
+    );
+    const app = createMockApp();
+    router.register(app as any);
+
+    await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> hi", ts: "169.1" } });
+
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: undefined });
   });
 
   it("does not route a DM from a non-allowed user", async () => {

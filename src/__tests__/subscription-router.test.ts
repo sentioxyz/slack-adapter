@@ -107,6 +107,97 @@ describe("classifySubscription", () => {
     );
     expect(r).toEqual({ kind: "sub-continue", channelId: "D123", threadTs: "1.1", userId: "U1", text: "more" });
   });
+
+  it("starts a mid-thread session when mentioned in an unknown thread (root threadTs, midThread flag)", () => {
+    // A human thread the bot doesn't own: an explicit @mention is an opt-in
+    // signal, so we start a session bound to the thread ROOT (thread_ts), not
+    // the reply ts, so later replies match hasThreadSession and continue.
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@BOT1> can you look at this?", ts: "169.5", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => false }),
+    );
+    expect(r).toEqual({
+      kind: "sub-start",
+      channelId: "C_SUB",
+      threadTs: "169.1",
+      userId: "U1",
+      text: "can you look at this?",
+      midThread: true,
+      triggerTs: "169.5",
+    });
+  });
+
+  it("ignores a thread reply that does NOT mention the bot in mention mode (no hijacking)", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "humans talking", ts: "169.5", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => false, subscribedChannels: [{ channelId: "C_SUB", trigger: "mention" }] }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("ignores a thread reply that does NOT mention the bot even in 'all' mode (no hijacking)", () => {
+    // trigger:"all" applies to TOP-LEVEL messages; a thread the bot doesn't own
+    // must not be hijacked without an explicit mention.
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "humans talking", ts: "169.5", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => false, subscribedChannels: [{ channelId: "C_SUB", trigger: "all" }] }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("continues (not starts) a mention in a thread that already has a bot session", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@BOT1> more", ts: "169.5", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "more" });
+  });
+
+  it("respects allowedUserIds for a mid-thread mention", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U_NO", text: "<@BOT1> hi", ts: "169.5", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => false, allowedUserIds: ["U_YES"] }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("starts a mid-thread session via mentionAnyChannel for a non-subscribed channel", () => {
+    const r = classifySubscription(
+      { channel: "C_OTHER", user: "U1", text: "<@BOT1> help", ts: "169.5", thread_ts: "169.1" },
+      ctx({ subscribedChannels: [], mentionAnyChannel: true, hasThreadSession: () => false }),
+    );
+    expect(r).toEqual({
+      kind: "sub-start",
+      channelId: "C_OTHER",
+      threadTs: "169.1",
+      userId: "U1",
+      text: "help",
+      midThread: true,
+      triggerTs: "169.5",
+    });
+  });
+
+  it("starts a mid-thread session inside a DM thread the bot does not yet own", () => {
+    const r = classifySubscription(
+      { channel: "D123", user: "U1", text: "<@BOT1> here", ts: "1.5", thread_ts: "1.1" },
+      ctx({ subscribedChannels: [], respondToDms: true, hasThreadSession: () => false }),
+    );
+    expect(r).toEqual({
+      kind: "sub-start",
+      channelId: "D123",
+      threadTs: "1.1",
+      userId: "U1",
+      text: "here",
+      midThread: true,
+      triggerTs: "1.5",
+    });
+  });
+
+  it("leaves midThread undefined on a top-level sub-start", () => {
+    const r = classifySubscription({ channel: "C_SUB", user: "U1", text: "<@BOT1> go", ts: "169.1" }, ctx());
+    expect(r.kind).toBe("sub-start");
+    expect((r as { midThread?: boolean }).midThread).toBeUndefined();
+  });
 });
 
 function deps(overrides: Partial<ThreadSessionDeps> = {}): ThreadSessionDeps {

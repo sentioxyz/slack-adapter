@@ -41,7 +41,22 @@ export interface SubscriptionContext {
 
 export type Classification =
   | { kind: "ignore" }
-  | { kind: "sub-start"; channelId: string; threadTs: string; userId: string; text: string }
+  | {
+      kind: "sub-start";
+      channelId: string;
+      threadTs: string;
+      userId: string;
+      text: string;
+      /**
+       * True only when the session is started from an @mention INSIDE an
+       * existing (non-bot-owned) thread. Top-level starts leave this
+       * undefined. The adapter uses it to fetch and prepend the thread's
+       * full history as context. `triggerTs` is the ts of the mentioning
+       * message so the adapter can exclude it from that context block.
+       */
+      midThread?: boolean;
+      triggerTs?: string;
+    }
   | { kind: "sub-continue"; channelId: string; threadTs: string; userId: string; text: string };
 
 /** True when `text` mentions the given bot user (`<@U..>` or `<@U..|name>`). */
@@ -60,9 +75,12 @@ export function stripBotMention(text: string, botUserId: string): string {
 /**
  * Decide what to do with a message in a (potentially) subscribed channel.
  *
- * Sessions are only ever started from a top-level trigger; a reply in a thread
- * the bot does not already own is ignored in both trigger modes, so the bot
- * never hijacks unrelated human threads.
+ * Sessions normally start from a top-level trigger. A reply in a thread the
+ * bot does not already own is ignored UNLESS it explicitly @mentions the bot:
+ * an explicit mention is always an opt-in signal, so it starts a session bound
+ * to that thread (a "mid-thread" start). Without a mention, such replies are
+ * ignored in both trigger modes, so the bot never hijacks unrelated human
+ * threads.
  */
 export function classifySubscription(msg: SubscriptionMessage, ctx: SubscriptionContext): Classification {
   if (msg.bot_id) return { kind: "ignore" };
@@ -94,10 +112,20 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 
   const text = stripBotMention(msg.text ?? "", ctx.botUserId);
 
-  // Thread reply → continue only a known bot thread.
+  // Thread reply.
   if (msg.thread_ts) {
+    // A thread the bot already owns → continue the existing session.
     if (ctx.hasThreadSession(channelId, msg.thread_ts)) {
       return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text };
+    }
+    // An unowned (human) thread: only join it on an explicit @mention. This is
+    // independent of sub.trigger — even in "all" mode we must not hijack a
+    // human thread the bot wasn't asked to join. Bind the session to the thread
+    // ROOT (msg.thread_ts) so subsequent replies match hasThreadSession and
+    // continue this session. triggerTs is the mentioning message's ts, which the
+    // adapter uses to exclude it from the prepended thread-history context.
+    if (mentionsBot(msg.text ?? "", ctx.botUserId)) {
+      return { kind: "sub-start", channelId, threadTs: msg.thread_ts, userId, text, midThread: true, triggerTs: msg.ts };
     }
     return { kind: "ignore" };
   }
