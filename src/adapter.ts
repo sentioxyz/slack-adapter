@@ -95,6 +95,110 @@ export interface SettingsAPI {
   set(key: string, value: unknown): Promise<void>;
 }
 
+/** A single Slack thread message, as far as thread-context rendering cares. */
+export interface ThreadContextMessage {
+  ts?: string;
+  user?: string;
+  bot_id?: string;
+  text?: string;
+}
+
+/**
+ * Render a list of Slack thread messages as a prependable context block.
+ *
+ * Each message renders as "<@USER>: text"; bot messages fall back to their
+ * `bot_id` and messages with neither become "<unknown>". The triggering
+ * message — identified by `triggerTs` — is skipped because it is dispatched
+ * separately as the user's text; when `triggerTs` is undefined nothing is
+ * skipped. Blank/whitespace-only messages are dropped. Returns "" when there
+ * is nothing worth prepending, so the caller can cheaply test for emptiness.
+ *
+ * Exported as a pure function so the rendering rules can be unit-tested without
+ * a live Slack client.
+ */
+export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?: string): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    // Skip the triggering message — it's already dispatched as the user text.
+    if (triggerTs && m.ts === triggerTs) continue;
+    const text = (m.text ?? "").trim();
+    if (!text) continue;
+    const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
+    lines.push(`${author}: ${text}`);
+  }
+  if (lines.length === 0) return "";
+
+  return [
+    "[Thread context — full history of the Slack thread this conversation was started from]",
+    ...lines,
+    "[End thread context]",
+  ].join("\n");
+}
+
+/**
+ * Fetch a full Slack thread via conversations.replies and render it as a
+ * prependable context block (see {@link renderThreadContext}).
+ *
+ * conversations.replies returns OLDEST messages first and paginates with
+ * `has_more` + `response_metadata.next_cursor`. We follow the cursor FORWARD so
+ * the accumulated list runs through to the NEWEST messages — the exchange right
+ * before the @mention, which is the whole reason the bot was pulled in. A single
+ * `limit:200` fetch would silently drop exactly those newest messages on a long
+ * thread. We page up to `maxPages` and warn (rather than fail silently) if even
+ * that overflows, in which case only the oldest head is lost.
+ *
+ * The Slack call is NOT wrapped here — the caller catches failures so it can
+ * degrade gracefully (dispatch the bare message rather than dropping it).
+ *
+ * Exported as a pure function (enqueue + log injected) so the pagination and
+ * truncation-logging behavior can be unit-tested without a live Slack client.
+ */
+export async function fetchThreadContext(
+  enqueue: <T = unknown>(method: "conversations.replies", params: Record<string, unknown>) => Promise<T>,
+  log: Logger,
+  channelId: string,
+  threadTs: string,
+  triggerTs?: string,
+  maxPages = 10,
+): Promise<string> {
+  const PAGE_LIMIT = 200;
+  const collected: ThreadContextMessage[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  let truncated = false;
+
+  do {
+    const params: Record<string, unknown> = { channel: channelId, ts: threadTs, limit: PAGE_LIMIT };
+    if (cursor) params.cursor = cursor;
+    const res = await enqueue<{
+      messages?: ThreadContextMessage[];
+      has_more?: boolean;
+      response_metadata?: { next_cursor?: string };
+    }>("conversations.replies", params);
+
+    collected.push(...(res?.messages ?? []));
+    pages += 1;
+
+    cursor = res?.has_more ? res?.response_metadata?.next_cursor : undefined;
+
+    if (cursor && pages >= maxPages) {
+      truncated = true;
+      break;
+    }
+  } while (cursor);
+
+  if (truncated) {
+    // We retained the newest maxPages*limit messages; only an extremely long
+    // thread loses its oldest head. Make that loss visible rather than silent.
+    log.warn(
+      { channelId, threadTs, collected: collected.length, maxPages },
+      "Thread exceeds context page cap; oldest messages omitted from prepended history",
+    );
+  }
+
+  return renderThreadContext(collected, triggerTs);
+}
+
 /** Dependencies for the `/openacp-archive` slash command handler. */
 export interface ArchiveCommandDeps {
   findSessionByChannel(channelId: string): { sessionId: string; meta: SlackSessionMeta } | undefined;
@@ -448,7 +552,7 @@ export class SlackAdapter extends MessagingAdapter {
       this.slackConfig,
       (channelId, threadTs) => this.hasThreadSession(channelId, threadTs),
       // onSubscriptionMessage: bind the thread to a session and dispatch
-      async (channelId, threadTs, userId, text, files) => {
+      async (channelId, threadTs, userId, text, files, opts) => {
         try {
           const { meta } = await resolveThreadSession(
             {
@@ -461,7 +565,24 @@ export class SlackAdapter extends MessagingAdapter {
             channelId,
             threadTs,
           );
-          await this.dispatchToSession(meta.channelSlug, text, userId, files);
+
+          // When the session is started by an @mention INSIDE an existing human
+          // thread, the agent has no idea what was already discussed there.
+          // Fetch the full thread and prepend it as a context block so the agent
+          // sees the conversation it was pulled into. The triggering message
+          // (already delivered as `text`) is excluded by ts. Degrade gracefully:
+          // if the fetch fails, dispatch the bare message rather than dropping it.
+          let dispatchText = text;
+          if (opts?.midThread) {
+            try {
+              const ctxBlock = await this.buildThreadContext(channelId, threadTs, opts.triggerTs);
+              if (ctxBlock) dispatchText = `${ctxBlock}\n\n${text}`;
+            } catch (ctxErr) {
+              this.log.warn({ err: ctxErr, channelId, threadTs }, "Failed to fetch thread history for mid-thread mention; dispatching without context");
+            }
+          }
+
+          await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files);
         } catch (err) {
           this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
         }
@@ -999,6 +1120,25 @@ export class SlackAdapter extends MessagingAdapter {
     } catch (err) {
       this.log.warn({ err, sessionId, channelId }, "Failed to restore session channel — channel may be deleted");
     }
+  }
+
+  /**
+   * Thin instance wrapper over {@link fetchThreadContext}, binding it to this
+   * adapter's send queue and logger. See that function for the pagination and
+   * graceful-degradation contract.
+   */
+  private buildThreadContext(
+    channelId: string,
+    threadTs: string,
+    triggerTs?: string,
+  ): Promise<string> {
+    return fetchThreadContext(
+      (method, params) => this.queue.enqueue(method, params),
+      this.log,
+      channelId,
+      threadTs,
+      triggerTs,
+    );
   }
 
   /**

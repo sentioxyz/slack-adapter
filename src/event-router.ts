@@ -31,13 +31,17 @@ export type IncomingMessageCallback = (sessionId: string, text: string, userId: 
 // Callback to create a new session when user messages the notification channel
 export type NewSessionCallback = (text: string, userId: string) => void;
 
-// Callback to dispatch a subscribed-channel message (start or continue a thread session)
+// Callback to dispatch a subscribed-channel message (start or continue a thread session).
+// `opts.midThread` is set when the session was started by an @mention inside an
+// existing (non-bot-owned) thread; `opts.triggerTs` is that mention's ts so the
+// adapter can fetch the thread history and exclude the triggering message.
 export type SubscriptionMessageCallback = (
   channelId: string,
   threadTs: string,
   userId: string,
   text: string,
   files?: SlackFileInfo[],
+  opts?: { midThread?: boolean; triggerTs?: string },
 ) => void | Promise<void>;
 
 export interface ISlackEventRouter {
@@ -105,7 +109,14 @@ export class SlackEventRouter implements ISlackEventRouter {
         },
       );
       if (cls.kind !== "ignore") {
-        await this.onSubscriptionMessage?.(cls.channelId, cls.threadTs, cls.userId, cls.text, files);
+        // Forward the mid-thread markers (only present on a sub-start that began
+        // from an @mention inside an unowned thread) so the adapter can prepend
+        // the thread's full history before dispatching.
+        const opts =
+          cls.kind === "sub-start"
+            ? { midThread: cls.midThread, triggerTs: cls.triggerTs }
+            : undefined;
+        await this.onSubscriptionMessage?.(cls.channelId, cls.threadTs, cls.userId, cls.text, files, opts);
         return;
       }
 
