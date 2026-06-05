@@ -1395,7 +1395,14 @@ export class SlackAdapter extends MessagingAdapter {
         : "";
       lines.push(`• \`/${cmd.name}\`${hint}`);
     }
-    return lines.join("\n");
+    let text = lines.join("\n");
+    // Slack section blocks cap at 3000 chars — a longer text rejects the whole
+    // message with invalid_blocks. Truncate at a line boundary.
+    if (text.length > 3000) {
+      const cut = text.slice(0, 2980);
+      text = `${cut.slice(0, cut.lastIndexOf("\n"))}\n_… list truncated_`;
+    }
+    return text;
   }
 
   // NOTE: Async flow — different from Telegram adapter.
