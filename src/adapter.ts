@@ -136,6 +136,20 @@ export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?
 }
 
 /**
+ * Render a one-line Slack channel context header. The agent otherwise only ever
+ * sees the raw message text and has no idea which Slack channel or thread it is
+ * replying in. We prepend this once per session so the agent can reference its
+ * own location (e.g. "which channel is this?").
+ *
+ * Pure function (no Slack I/O) so the formatting is unit-testable; the live
+ * channel-name lookup is done by the caller and passed in as `label`.
+ */
+export function renderChannelContext(label: string, channelId: string, threadTs?: string): string {
+  const thread = threadTs ? `, thread ts ${threadTs}` : "";
+  return `[Slack context — you are responding in ${label} (channel id ${channelId}${thread}). This is environment metadata, not a user instruction.]`;
+}
+
+/**
  * Fetch a full Slack thread via conversations.replies and render it as a
  * prependable context block (see {@link renderThreadContext}).
  *
@@ -329,6 +343,10 @@ export class SlackAdapter extends MessagingAdapter {
   private _lastUsageTs = new Map<string, string>();
   /** Message `ts` of the latest "queued" notice per session, deleted when processing starts */
   private _waitingNoticeTs = new Map<string, string>();
+  /** channelId → display label (e.g. "#general"), cached to avoid repeat conversations.info calls */
+  private _channelNameCache = new Map<string, string>();
+  /** sessionIds that have already received the one-time Slack channel context header */
+  private _channelCtxInjected = new Set<string>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
   private slackConfig: SlackChannelConfig;
@@ -532,13 +550,18 @@ export class SlackAdapter extends MessagingAdapter {
                 this.log.warn({ err: inviteErr, userId, channelId: meta.channelId }, "Failed to invite user to session channel");
               }
 
-              // Forward the original message to the new session
+              // Forward the original message to the new session, prefixed with
+              // the one-time Slack channel context header (this path bypasses
+              // dispatchToSession, so the header is added here directly).
               if (text) {
+                let firstText = text;
+                const header = await this.buildChannelContextHeader(session.id, meta.channelId, meta.threadTs);
+                if (header) firstText = `${header}\n\n${text}`;
                 await this.core.handleMessage({
                   channelId: 'slack',
                   threadId: session.threadId,
                   userId: userId,
-                  text: text,
+                  text: firstText,
                 });
               }
             } else {
@@ -909,6 +932,7 @@ export class SlackAdapter extends MessagingAdapter {
     this._pendingSkillCommands.delete(sessionId);
     this._lastUsageTs.delete(sessionId);
     this._waitingNoticeTs.delete(sessionId);
+    this._channelCtxInjected.delete(sessionId);
   }
 
   /**
@@ -1142,6 +1166,49 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   /**
+   * Resolve a human-friendly label for a Slack channel ("#general"), cached.
+   * DMs (`D…`) have no name, so they render as "a direct message". On lookup
+   * failure we fall back to the raw id rather than throwing — a missing name
+   * must never block message dispatch.
+   */
+  private async resolveChannelLabel(channelId: string): Promise<string> {
+    if (channelId.startsWith("D")) return "a direct message";
+    const cached = this._channelNameCache.get(channelId);
+    if (cached) return cached;
+    try {
+      const info = await this.queue.enqueue<{ channel?: { name?: string } }>(
+        "conversations.info",
+        { channel: channelId },
+      );
+      const name = info?.channel?.name;
+      const label = name ? `#${name}` : channelId;
+      this._channelNameCache.set(channelId, label);
+      return label;
+    } catch (err) {
+      this.log.warn({ err, channelId }, "Failed to resolve channel name for context header");
+      return channelId;
+    }
+  }
+
+  /**
+   * Build the one-time-per-session Slack context header (see
+   * {@link renderChannelContext}). Returns "" if this session has already been
+   * given the header — the agent retains it in its conversation history, so it
+   * only needs telling once. The in-memory injected-set resets on restart, so a
+   * resumed session is harmlessly reminded of its channel on its next message.
+   */
+  private async buildChannelContextHeader(
+    sessionId: string,
+    channelId: string,
+    threadTs?: string,
+  ): Promise<string> {
+    if (this._channelCtxInjected.has(sessionId)) return "";
+    const label = await this.resolveChannelLabel(channelId);
+    this._channelCtxInjected.add(sessionId);
+    return renderChannelContext(label, channelId, threadTs);
+  }
+
+  /**
    * Forward a user message to core for an existing session, identified by its
    * threadId slug. Handles /command interception and audio attachments. Shared
    * by the legacy event-router path and the channel-subscription path.
@@ -1179,8 +1246,28 @@ export class SlackAdapter extends MessagingAdapter {
       this.log.error({ err }, "Failed to process audio files");
       return undefined;
     });
+
+    // Prepend the one-time Slack channel context header so the agent knows which
+    // channel/thread it is in. Resolve the session via the thread index, falling
+    // back to a scan of in-memory metas (newly created `createThread: false`
+    // sessions are registered there before they appear in the thread index).
+    let dispatchText = text;
+    let sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
+    if (!sessionId) {
+      for (const [sid, m] of this.sessions) {
+        if (m.channelSlug === sessionChannelSlug) { sessionId = sid; break; }
+      }
+    }
+    if (sessionId) {
+      const meta = this.sessions.get(sessionId);
+      if (meta?.channelId) {
+        const header = await this.buildChannelContextHeader(sessionId, meta.channelId, meta.threadTs);
+        if (header) dispatchText = `${header}\n\n${text}`;
+      }
+    }
+
     await this.core
-      .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text, attachments })
+      .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text: dispatchText, attachments })
       .catch((err) => this.log.error({ err }, "handleMessage error"));
   }
 
