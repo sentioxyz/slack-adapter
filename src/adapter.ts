@@ -1631,6 +1631,13 @@ export class SlackAdapter extends MessagingAdapter {
    * If the session channel is not yet ready, queues for later flush.
    */
   async sendSkillCommands(sessionId: string, commands: AgentCommand[]): Promise<void> {
+    // Only surface the "Available commands" card at high verbosity. In low /
+    // medium output modes it's noise, so skip posting to Slack entirely.
+    if (this.resolveOutputMode(sessionId) !== "high") {
+      this._pendingSkillCommands.delete(sessionId);
+      return;
+    }
+
     const meta = this.sessions.get(sessionId);
     if (!meta) {
       // Channel not ready yet — queue and flush in flushPendingSkillCommands()
