@@ -1053,7 +1053,7 @@ export class SlackAdapter extends MessagingAdapter {
   private getTextBuffer(sessionId: string, channelId: string, threadTs?: string): SlackTextBuffer {
     let buf = this.textBuffers.get(sessionId);
     if (!buf) {
-      buf = new SlackTextBuffer(channelId, threadTs, sessionId, this.queue, this.log);
+      buf = new SlackTextBuffer(channelId, threadTs, sessionId, this.queue, this.log, this.slackConfig.broadcastReplies);
       this.textBuffers.set(sessionId, buf);
     }
     return buf;
