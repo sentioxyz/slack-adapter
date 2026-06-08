@@ -23,6 +23,7 @@ export class SlackTextBuffer {
     private sessionId: string,
     private queue: ISlackSendQueue,
     logger?: Logger,
+    private broadcast: boolean = false,
   ) {
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
   }
@@ -57,6 +58,9 @@ export class SlackTextBuffer {
           const result = await this.queue.enqueue("chat.postMessage", {
             channel: this.channelId,
             ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+            // reply_broadcast only has meaning on a threaded reply; Slack
+            // ignores it on top-level posts.
+            ...(this.threadTs && this.broadcast ? { reply_broadcast: true } : {}),
             text: chunk,
             blocks: [{ type: "section", text: { type: "mrkdwn", text: chunk } }],
           });

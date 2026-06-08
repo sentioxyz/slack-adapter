@@ -48,6 +48,13 @@ export const SlackChannelConfigSchema = z.object({
    * gates who may start a DM session. Set false to ignore DMs entirely.
    */
   respondToDms: z.boolean().default(true),
+  /**
+   * When true, the bot's reply text in subscribed-channel threads is also
+   * mirrored into the channel's main timeline via Slack's `reply_broadcast`,
+   * so important answers are visible without opening the thread. Only affects
+   * threaded replies; DM and non-threaded output are unchanged. Default false.
+   */
+  broadcastReplies: z.boolean().default(false),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;

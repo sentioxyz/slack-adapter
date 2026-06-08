@@ -42,6 +42,7 @@ Add to your `~/.openacp/config.json`:
 | `autoCreateSession` | Create a startup session on boot. Default: `true` |
 | `outputMode` | Default verbosity: `"low"`, `"medium"`, or `"high"`. Default: `"medium"` |
 | `subscribedChannels` | Optional. Channels to watch: `[{ "channelId": "C...", "trigger": "mention" \| "all" }]`. Invite the bot to each. Default: `[]` |
+| `broadcastReplies` | Optional. Also mirror the bot's threaded replies into the channel's main timeline (Slack `reply_broadcast`), so important answers are visible without opening the thread. Default: `false` |
 
 ### Output Mode
 

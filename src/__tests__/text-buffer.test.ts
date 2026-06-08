@@ -137,4 +137,34 @@ describe("SlackTextBuffer", () => {
       expect.objectContaining({ channel: "C_SUB", thread_ts: "169.1" }),
     );
   });
+
+  it("does not set reply_broadcast by default", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "1.1" });
+    const queue = { enqueue } as any;
+    const buf = new SlackTextBuffer("C_SUB", "169.1", "sess-1", queue);
+    buf.append("hello world");
+    await buf.flush();
+    expect(enqueue.mock.calls[0][1]).not.toHaveProperty("reply_broadcast");
+  });
+
+  it("sets reply_broadcast on threaded replies when broadcast is enabled", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "1.1" });
+    const queue = { enqueue } as any;
+    const buf = new SlackTextBuffer("C_SUB", "169.1", "sess-1", queue, undefined, true);
+    buf.append("important answer");
+    await buf.flush();
+    expect(enqueue).toHaveBeenCalledWith(
+      "chat.postMessage",
+      expect.objectContaining({ thread_ts: "169.1", reply_broadcast: true }),
+    );
+  });
+
+  it("omits reply_broadcast when broadcast is enabled but there is no thread", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "1.1" });
+    const queue = { enqueue } as any;
+    const buf = new SlackTextBuffer("C_SUB", undefined, "sess-1", queue, undefined, true);
+    buf.append("dm answer");
+    await buf.flush();
+    expect(enqueue.mock.calls[0][1]).not.toHaveProperty("reply_broadcast");
+  });
 });
