@@ -1,8 +1,13 @@
 // src/event-router.ts
 import type { App } from "@slack/bolt";
-import type { SlackSessionMeta, SlackFileInfo, ForwardedMessage, Logger } from "./types.js";
+import type { SlackSessionMeta, SlackFileInfo, ForwardedMessage, RawSlackAttachment, Logger } from "./types.js";
 import type { SlackChannelConfig } from "./types.js";
 import { classifySubscription } from "./subscription-router.js";
+import { extractForwards } from "./attachment-collector.js";
+
+// Forward extraction lives with the collector (it is reused for every
+// thread-history message too); re-exported here for callers and existing tests.
+export { extractForwards };
 
 /** Subset of Bolt's message event fields used by the router */
 interface SlackMessageEvent {
@@ -20,38 +25,7 @@ interface SlackMessageEvent {
     size: number;
     url_private: string;
   }>;
-  attachments?: Array<{
-    author_name?: string;
-    author_id?: string;
-    channel_name?: string;
-    ts?: string;
-    text?: string;
-    files?: Array<{ id: string; name: string; mimetype: string; size: number; url_private: string }>;
-  }>;
-}
-
-/** Extract forwarded/shared messages (text + nested files) from a Slack
- * message's `attachments` array. Attachments with neither text nor files
- * (e.g. content-less link unfurls) are skipped. Exported for unit testing. */
-export function extractForwards(
-  attachments: SlackMessageEvent["attachments"],
-): ForwardedMessage[] {
-  const out: ForwardedMessage[] = [];
-  for (const a of attachments ?? []) {
-    const files: SlackFileInfo[] = (a.files ?? []).map((f) => ({
-      id: f.id, name: f.name, mimetype: f.mimetype, size: f.size, url_private: f.url_private,
-    }));
-    const text = (a.text ?? "").trim();
-    if (!text && files.length === 0) continue;
-    out.push({
-      author: a.author_name ?? a.author_id,
-      channelName: a.channel_name,
-      ts: a.ts,
-      text,
-      files,
-    });
-  }
-  return out;
+  attachments?: RawSlackAttachment[];
 }
 
 // Callback to look up which session (if any) owns a Slack channelId
