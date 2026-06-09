@@ -93,6 +93,21 @@ export interface ForwardedMessage {
   files: SlackFileInfo[]; // files attached to the shared message
 }
 
+/**
+ * A raw Slack message `attachments[]` entry — the payload Slack uses for a
+ * shared/forwarded message (author, source channel, text, and nested files).
+ * Present both on incoming events and on messages returned by
+ * conversations.replies, so forwards can be extracted from any thread message.
+ */
+export interface RawSlackAttachment {
+  author_name?: string;
+  author_id?: string;
+  channel_name?: string;
+  ts?: string;
+  text?: string;
+  files?: SlackFileInfo[];
+}
+
 /** A file candidate collected from the triggering message, thread, or a forward. */
 export interface CollectedAttachment {
   file: SlackFileInfo;
