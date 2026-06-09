@@ -36,8 +36,10 @@ import { SlackEventRouter } from "./event-router.js";
 import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
-import { isAudioClip } from "./utils.js";
 import { resolveThreadSession } from "./subscription-router.js";
+import { SlackFileProxy } from "./file-proxy.js";
+import { collectAttachments } from "./attachment-collector.js";
+import type { ForwardedMessage } from "./types.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -443,6 +445,9 @@ export class SlackAdapter extends MessagingAdapter {
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
   private settingsAPI?: SettingsAPI;
+  private fileProxy?: SlackFileProxy;
+  /** file ids already surfaced to the agent, keyed by session channel slug */
+  private surfacedFiles = new Map<string, Set<string>>();
 
   constructor(
     core: CoreKernel,
@@ -490,6 +495,17 @@ export class SlackAdapter extends MessagingAdapter {
     this.webClient = new WebClient(botToken);
     this.queue = new SlackSendQueue(this.webClient);
     this.fileService = this.core.fileService;
+
+    // Start the lazy file proxy (best-effort — must not block startup). It
+    // serves binary attachments to the agent on demand; if it fails to bind a
+    // port, binary attachments degrade to being skipped rather than crashing.
+    try {
+      this.fileProxy = new SlackFileProxy({ botToken: botToken!, log: this.log });
+      await this.fileProxy.start();
+    } catch (err) {
+      this.log.warn({ err }, "Failed to start Slack file proxy; binary attachments will be skipped");
+      this.fileProxy = undefined;
+    }
 
     // Resolve bot user ID — required to filter bot's own messages (prevent infinite loop)
     const authResult = await this.webClient.auth.test();
@@ -609,8 +625,14 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files) =>
-        this.dispatchToSession(sessionChannelSlug, text, userId, files),
+      (sessionChannelSlug, text, userId, files, forwards) => {
+        const meta = [...this.sessions.values()].find((m) => m.channelSlug === sessionChannelSlug);
+        return this.dispatchToSession(sessionChannelSlug, text, userId, files, {
+          channelId: meta?.channelId,
+          threadTs: meta?.threadTs,
+          forwards,
+        });
+      },
       this.botUserId,
       this.slackConfig.notificationChannelId,
       // onNewSession: create a new session with a private channel
@@ -696,7 +718,12 @@ export class SlackAdapter extends MessagingAdapter {
             }
           }
 
-          await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files);
+          await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files, {
+            channelId,
+            threadTs,
+            triggerTs: opts?.triggerTs,
+            forwards: opts?.forwards,
+          });
         } catch (err) {
           this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
         }
@@ -920,6 +947,8 @@ export class SlackAdapter extends MessagingAdapter {
       buf.destroy();
     }
     this.textBuffers.clear();
+    await this.fileProxy?.stop().catch((err) => this.log.warn({ err }, "Error stopping Slack file proxy"));
+    this.fileProxy = undefined;
     // Guard for the graceful-degradation path: if start() returned early
     // because credentials were missing, this.app was never assigned.
     if (this.app) await this.app.stop();
@@ -1301,59 +1330,85 @@ export class SlackAdapter extends MessagingAdapter {
 
   /**
    * Forward a user message to core for an existing session, identified by its
-   * threadId slug. Handles /command interception and audio attachments. Shared
-   * by the legacy event-router path and the channel-subscription path.
+   * threadId slug. Handles /command interception, the one-time Slack channel
+   * context header, and attachment collection (trigger files, thread-history
+   * files, and forwarded messages) via the file proxy / inline payload builder.
+   * Shared by the legacy event-router path and the channel-subscription path.
    */
   private async dispatchToSession(
     sessionChannelSlug: string,
     text: string,
     userId: string,
     files?: SlackFileInfo[],
+    extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[] },
   ): Promise<void> {
-    const processFiles = async (): Promise<Attachment[] | undefined> => {
-      if (!files?.length) return undefined;
-      const audioFiles = files.filter((f) => isAudioClip(f));
-      if (!audioFiles.length) return undefined;
-
-      const attachments: Attachment[] = [];
-      for (const file of audioFiles) {
-        const buffer = await this.downloadSlackFile(file.url_private);
-        if (!buffer) continue;
-        const mimeType = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
-        const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
-        if (!sessionId) continue;
-        const att = await this.fileService.saveFile(sessionId, file.name, buffer, mimeType);
-        attachments.push(att);
-      }
-      return attachments.length > 0 ? attachments : undefined;
-    };
-
     if (text.startsWith("/")) {
       const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
       if (handled) return;
     }
 
-    const attachments = await processFiles().catch((err) => {
-      this.log.error({ err }, "Failed to process audio files");
-      return undefined;
-    });
+    let dispatchText = text;
+    let attachments: Attachment[] | undefined;
+
+    try {
+      const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
+      if (sessionId && this.fileProxy) {
+        let threadMessages: ThreadContextMessage[] | undefined;
+        if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
+          try {
+            threadMessages = await fetchThreadMessages(
+              (method: any, params: any) => this.queue.enqueue(method, params),
+              this.log, extras.channelId, extras.threadTs,
+            );
+          } catch (err) {
+            this.log.warn({ err }, "Failed to fetch thread history for attachments; using triggering message only");
+          }
+        }
+
+        const seen = this.surfacedFiles.get(sessionChannelSlug) ?? new Set<string>();
+        const { attachments: collected, forwardedTexts } = collectAttachments({
+          triggerFiles: files,
+          threadMessages,
+          forwards: extras?.forwards,
+          seen,
+        });
+
+        const payload = await buildAttachmentPayload({
+          sessionId,
+          inlineMaxBytes: this.slackConfig.attachmentInlineMaxBytes ?? 16384,
+          collected,
+          forwardedTexts,
+          download: (url) => this.downloadSlackFile(url),
+          saveFile: (sid, name, buf, mime) => this.fileService.saveFile(sid, name, buf, mime),
+          registerProxy: (f) => this.fileProxy!.register({ url_private: f.url_private, mimetype: f.mimetype, name: f.name }),
+          log: this.log,
+        });
+
+        for (const id of payload.surfacedIds) seen.add(id);
+        this.surfacedFiles.set(sessionChannelSlug, seen);
+
+        if (payload.promptAdditions) dispatchText = `${text}\n\n${payload.promptAdditions}`;
+        if (payload.attachments.length) attachments = payload.attachments;
+      }
+    } catch (err) {
+      this.log.error({ err }, "Failed to process attachments; dispatching message text only");
+    }
 
     // Prepend the one-time Slack channel context header so the agent knows which
     // channel/thread it is in. Resolve the session via the thread index, falling
     // back to a scan of in-memory metas (newly created `createThread: false`
     // sessions are registered there before they appear in the thread index).
-    let dispatchText = text;
-    let sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
-    if (!sessionId) {
+    let headerSessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
+    if (!headerSessionId) {
       for (const [sid, m] of this.sessions) {
-        if (m.channelSlug === sessionChannelSlug) { sessionId = sid; break; }
+        if (m.channelSlug === sessionChannelSlug) { headerSessionId = sid; break; }
       }
     }
-    if (sessionId) {
-      const meta = this.sessions.get(sessionId);
+    if (headerSessionId) {
+      const meta = this.sessions.get(headerSessionId);
       if (meta?.channelId) {
-        const header = await this.buildChannelContextHeader(sessionId, meta.channelId, meta.threadTs);
-        if (header) dispatchText = `${header}\n\n${text}`;
+        const header = await this.buildChannelContextHeader(headerSessionId, meta.channelId, meta.threadTs);
+        if (header) dispatchText = `${header}\n\n${dispatchText}`;
       }
     }
 
