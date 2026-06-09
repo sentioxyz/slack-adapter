@@ -1,6 +1,6 @@
 // src/event-router.ts
 import type { App } from "@slack/bolt";
-import type { SlackSessionMeta, SlackFileInfo, Logger } from "./types.js";
+import type { SlackSessionMeta, SlackFileInfo, ForwardedMessage, Logger } from "./types.js";
 import type { SlackChannelConfig } from "./types.js";
 import { classifySubscription } from "./subscription-router.js";
 
@@ -20,13 +20,48 @@ interface SlackMessageEvent {
     size: number;
     url_private: string;
   }>;
+  attachments?: Array<{
+    author_name?: string;
+    author_id?: string;
+    channel_name?: string;
+    ts?: string;
+    text?: string;
+    files?: Array<{ id: string; name: string; mimetype: string; size: number; url_private: string }>;
+  }>;
+}
+
+/** Extract forwarded/shared messages (text + nested files) from a Slack
+ * message's `attachments` array. Attachments with neither text nor files
+ * (e.g. content-less link unfurls) are skipped. Exported for unit testing. */
+export function extractForwards(
+  attachments: SlackMessageEvent["attachments"],
+): ForwardedMessage[] {
+  const out: ForwardedMessage[] = [];
+  for (const a of attachments ?? []) {
+    const files: SlackFileInfo[] = (a.files ?? []).map((f) => ({
+      id: f.id, name: f.name, mimetype: f.mimetype, size: f.size, url_private: f.url_private,
+    }));
+    const text = (a.text ?? "").trim();
+    if (!text && files.length === 0) continue;
+    out.push({
+      author: a.author_name ?? a.author_id,
+      channelName: a.channel_name,
+      ts: a.ts,
+      text,
+      files,
+    });
+  }
+  return out;
 }
 
 // Callback to look up which session (if any) owns a Slack channelId
 export type SessionLookup = (channelId: string) => SlackSessionMeta | undefined;
 
 // Callback to dispatch an incoming message to core
-export type IncomingMessageCallback = (sessionId: string, text: string, userId: string, files?: SlackFileInfo[]) => void | Promise<void>;
+export type IncomingMessageCallback = (
+  sessionId: string, text: string, userId: string,
+  files?: SlackFileInfo[], forwards?: ForwardedMessage[],
+) => void | Promise<void>;
 
 // Callback to create a new session when user messages the notification channel
 export type NewSessionCallback = (text: string, userId: string) => void;
@@ -41,7 +76,7 @@ export type SubscriptionMessageCallback = (
   userId: string,
   text: string,
   files?: SlackFileInfo[],
-  opts?: { midThread?: boolean; triggerTs?: string },
+  opts?: { midThread?: boolean; triggerTs?: string; forwards?: ForwardedMessage[] },
 ) => void | Promise<void>;
 
 export interface ISlackEventRouter {
@@ -87,6 +122,8 @@ export class SlackEventRouter implements ISlackEventRouter {
         url_private: f.url_private,
       }));
 
+      const forwards = extractForwards(msg.attachments);
+
       // Subscription path: self-contained decision. Returns "ignore" for any
       // channel not in subscribedChannels, so legacy behavior is untouched.
       const cls = classifySubscription(
@@ -114,8 +151,8 @@ export class SlackEventRouter implements ISlackEventRouter {
         // the thread's full history before dispatching.
         const opts =
           cls.kind === "sub-start"
-            ? { midThread: cls.midThread, triggerTs: cls.triggerTs }
-            : undefined;
+            ? { midThread: cls.midThread, triggerTs: cls.triggerTs, forwards }
+            : { forwards };
         await this.onSubscriptionMessage?.(cls.channelId, cls.threadTs, cls.userId, cls.text, files, opts);
         return;
       }
@@ -144,7 +181,7 @@ export class SlackEventRouter implements ISlackEventRouter {
       const session = this.sessionLookup(channelId);
       if (session) {
         this.log.debug({ channelId, sessionSlug: session.channelSlug }, "Routing to session");
-        this.onIncoming(session.channelSlug, text, userId, files);
+        this.onIncoming(session.channelSlug, text, userId, files, forwards);
         return;
       }
 
