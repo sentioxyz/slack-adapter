@@ -41,6 +41,8 @@ Add to your `~/.openacp/config.json`:
 | `allowedUserIds` | Optional. Restrict access to specific Slack user IDs |
 | `autoCreateSession` | Create a startup session on boot. Default: `true` |
 | `outputMode` | Default verbosity: `"low"`, `"medium"`, or `"high"`. Default: `"medium"` |
+| `attachmentInlineMaxBytes` | Text files ≤ this size (bytes) are inlined into the prompt; larger ones are saved as files. Default: `16384` |
+| `readThreadHistory` | Walk the full thread for attachments from every message, not just the triggering one. Default: `true` |
 | `subscribedChannels` | Optional. Channels to watch: `[{ "channelId": "C...", "trigger": "mention" \| "all" }]`. Invite the bot to each. Default: `[]` |
 
 ### Output Mode
@@ -72,6 +74,22 @@ Each top-level trigger opens a **thread**; the agent works and replies inside th
 thread, and any reply in the thread continues the same session (with full context).
 Tool-permission requests appear as buttons in the thread. The bot never archives a
 subscribed channel.
+
+### Attachments
+
+The bot reads files and forwarded/shared messages from the thread, not just the
+message body:
+
+- **Text** (`.txt`, `.log`, `.json`, `.csv`, code) — small files are inlined into
+  the prompt; larger ones are attached as files.
+- **Forwarded messages** — their text is inlined with attribution.
+- **Binaries** (images, PDFs, …) — surfaced as `localhost` download links served
+  by the adapter, which injects the bot token. The agent (same host) downloads
+  them only if it needs the bytes.
+
+Requires the `files:read` scope (file downloads) plus the relevant history scopes
+(`channels:history`, `groups:history`, `im:history`, `mpim:history`) for reading
+thread replies.
 
 ## Development
 
