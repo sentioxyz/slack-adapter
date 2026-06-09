@@ -386,8 +386,19 @@ describe("extractForwards", () => {
     expect(fwds[0].files[0].id).toBe("F1");
   });
 
-  it("skips attachments with neither text nor files (e.g. link unfurls without content)", () => {
-    expect(extractForwards([{ title: "just a link" }])).toEqual([]);
+  it("skips attachments with no readable body and no files", () => {
+    // Empty, and a placeholder-fallback-only attachment (e.g. action buttons).
+    expect(extractForwards([{}])).toEqual([]);
+    expect(extractForwards([{ fallback: "[no preview available]" }])).toEqual([]);
+  });
+
+  it("extracts integration-card attachments via title (+ link)", () => {
+    const fwds = extractForwards([
+      { title: "OffchainLabs/nitro on GitHub", title_link: "https://github.com/x/releases/tag/v3.10.2" },
+    ]);
+    expect(fwds).toHaveLength(1);
+    expect(fwds[0].text).toContain("OffchainLabs/nitro on GitHub");
+    expect(fwds[0].text).toContain("https://github.com/x/releases/tag/v3.10.2");
   });
 
   it("falls back to author_id when author_name is absent", () => {

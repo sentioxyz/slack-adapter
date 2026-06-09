@@ -105,6 +105,11 @@ export interface RawSlackAttachment {
   channel_name?: string;
   ts?: string;
   text?: string;
+  /** Integration/bot cards (GitHub, CI, …) carry their content here, not in `text`. */
+  pretext?: string;
+  title?: string;
+  title_link?: string;
+  fallback?: string;
   files?: SlackFileInfo[];
 }
 

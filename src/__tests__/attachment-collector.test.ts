@@ -42,11 +42,13 @@ describe("collectAttachments", () => {
     expect(res.attachments.map((a) => a.file.id)).toEqual(["F2"]);
   });
 
-  it("skips files from bot messages in the thread", () => {
+  it("reads files from third-party bot messages in the thread", () => {
+    // A bot_id alone no longer means "skip" — only OUR bot (selfUserId/selfBotId)
+    // is skipped. Third-party integration bots are legitimate thread content.
     const res = collectAttachments({
       threadMessages: [{ bot_id: "B1", files: [file("F9")] }],
     });
-    expect(res.attachments).toHaveLength(0);
+    expect(res.attachments.map((a) => a.file.id)).toEqual(["F9"]);
   });
 
   it("omits forwarded text entries that have no text", () => {
@@ -85,14 +87,52 @@ describe("collectAttachments", () => {
     expect(ff!.source).toBe("forward");
   });
 
-  it("skips forwards inside bot messages in history", () => {
+  it("reads third-party bot messages but skips our own bot's output", () => {
     const res = collectAttachments({
+      selfUserId: "UME",
+      selfBotId: "BME",
       threadMessages: [
-        { bot_id: "B1", attachments: [{ text: "bot forward", files: [file("FB")] }] },
+        // third-party integration bot (e.g. GitHub) — MUST be read
+        { bot_id: "B_GITHUB", attachments: [{ text: "release notes", files: [file("FG")] }] },
+        // our own bot's output (matched by bot_id) — MUST be skipped
+        { bot_id: "BME", user: "UME", attachments: [{ text: "replayed prompt", files: [file("FSELF")] }] },
+        // our own bot's output (matched by user only) — MUST be skipped
+        { user: "UME", files: [file("FSELF2")] },
       ],
     });
-    expect(res.forwardedTexts).toHaveLength(0);
-    expect(res.attachments).toHaveLength(0);
+    expect(res.forwardedTexts.some((t) => t.includes("release notes"))).toBe(true);
+    expect(res.forwardedTexts.some((t) => t.includes("replayed prompt"))).toBe(false);
+    const ids = res.attachments.map((a) => a.file.id);
+    expect(ids).toContain("FG");
+    expect(ids).not.toContain("FSELF");
+    expect(ids).not.toContain("FSELF2");
+  });
+
+  it("reads integration/bot cards: title + link + text, and skips button-only attachments", () => {
+    // Exact shape observed live: a GitHub release card (empty message text;
+    // content in attachments) — attachment[0] is a title/text card, attachment[1]
+    // is action buttons (blocks only, placeholder fallback).
+    const res = collectAttachments({
+      threadMessages: [
+        {
+          bot_id: "B_GITHUB",
+          attachments: [
+            {
+              title: "OffchainLabs/nitro on GitHub",
+              title_link: "https://github.com/OffchainLabs/nitro/releases/tag/v3.10.2",
+              text: "*nitro [Updated]* `v3.10.2`",
+              fallback: "OffchainLabs/nitro on GitHub",
+            },
+            { fallback: "[no preview available]" }, // action-buttons-only → no readable body
+          ],
+        },
+      ],
+    });
+    expect(res.forwardedTexts).toHaveLength(1);
+    const block = res.forwardedTexts[0];
+    expect(block).toContain("OffchainLabs/nitro on GitHub");
+    expect(block).toContain("https://github.com/OffchainLabs/nitro/releases/tag/v3.10.2");
+    expect(block).toContain("v3.10.2");
   });
 
   it("dedupes forwarded text shared by the triggering message and thread history", () => {
