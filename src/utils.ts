@@ -3,6 +3,18 @@
 
 import type { SlackFileInfo } from "./types.js";
 
+/** True only for HTTPS Slack-owned hosts — used to gate where the bot token may
+ * be sent when downloading url_private files (defense-in-depth against SSRF via
+ * forged forwarded-message URLs). */
+export function isSlackFileUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && /(^|\.)slack\.com$/.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Detect Slack audio clips — MIME type or filename pattern */
 export function isAudioClip(file: SlackFileInfo): boolean {
   return (file.mimetype === "video/mp4" && file.name?.startsWith("audio_message")) ||

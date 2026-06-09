@@ -39,6 +39,7 @@ import { toSlug } from "./slug.js";
 import { resolveThreadSession } from "./subscription-router.js";
 import { SlackFileProxy } from "./file-proxy.js";
 import { collectAttachments } from "./attachment-collector.js";
+import { isSlackFileUrl } from "./utils.js";
 import type { ForwardedMessage } from "./types.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
@@ -795,6 +796,10 @@ export class SlackAdapter extends MessagingAdapter {
   }
 
   private async downloadSlackFile(url: string): Promise<Buffer | null> {
+    if (!isSlackFileUrl(url)) {
+      this.log.warn({ url }, "Refusing to download non-Slack URL with bot token");
+      return null;
+    }
     try {
       const resp = await fetch(url, {
         headers: { Authorization: `Bearer ${this.slackConfig.botToken}` },
@@ -1053,6 +1058,7 @@ export class SlackAdapter extends MessagingAdapter {
     this._lastUsageTs.delete(sessionId);
     this._waitingNoticeTs.delete(sessionId);
     this._channelCtxInjected.delete(sessionId);
+    this.surfacedFiles.delete(meta.channelSlug);
   }
 
   /**

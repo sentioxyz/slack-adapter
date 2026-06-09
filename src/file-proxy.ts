@@ -5,6 +5,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import type { Logger } from "./types.js";
+import { isSlackFileUrl } from "./utils.js";
 
 export interface FileProxyEntry {
   url_private: string;
@@ -84,6 +85,11 @@ export class SlackFileProxy {
     if (!entry || entry.expiresAt < this.now()) {
       if (entry) this.entries.delete(token!);
       res.writeHead(404).end("not found");
+      return;
+    }
+    if (!isSlackFileUrl(entry.url_private)) {
+      this.log.warn({ name: entry.name }, "Refusing to proxy non-Slack url_private");
+      res.writeHead(502).end("invalid upstream");
       return;
     }
     try {

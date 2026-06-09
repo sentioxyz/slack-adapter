@@ -42,6 +42,16 @@ describe("SlackFileProxy", () => {
     expect(resp.status).toBe(502);
   });
 
+  it("refuses to proxy a non-Slack url_private without fetching", async () => {
+    const fetchImpl = vi.fn(async () => new Response("x", { status: 200 }));
+    proxy = new SlackFileProxy({ botToken: "xoxb-123", fetchImpl: fetchImpl as any });
+    await proxy.start();
+    const url = proxy.register({ url_private: "https://169.254.169.254/meta", mimetype: "application/pdf", name: "a.pdf" });
+    const resp = await fetch(url);
+    expect(resp.status).toBe(502);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("returns 404 for expired tokens", async () => {
     let t = 1000;
     proxy = new SlackFileProxy({ botToken: "xoxb-123", fetchImpl: okFetch("x") as any, ttlMs: 50, now: () => t });
