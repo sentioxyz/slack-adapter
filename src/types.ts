@@ -48,6 +48,17 @@ export const SlackChannelConfigSchema = z.object({
    * gates who may start a DM session. Set false to ignore DMs entirely.
    */
   respondToDms: z.boolean().default(true),
+  /**
+   * Text files at or below this size (bytes) are inlined into the prompt;
+   * larger text files are saved as file attachments. Default 16 KiB.
+   */
+  attachmentInlineMaxBytes: z.number().int().positive().default(16384),
+  /**
+   * When true (default), the adapter walks the full Slack thread
+   * (conversations.replies) to collect attachments from every message, not just
+   * the triggering one. Set false to limit API calls to the triggering message.
+   */
+  readThreadHistory: z.boolean().default(true),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
@@ -68,6 +79,28 @@ export interface SlackFileInfo {
   size: number;
   url_private: string;
 }
+
+/**
+ * A forwarded / shared message extracted from a Slack message's `attachments`
+ * array. Slack represents a shared message as an attachment carrying the
+ * original author, channel, text, and any files.
+ */
+export interface ForwardedMessage {
+  author?: string;       // author_name, falling back to author_id
+  channelName?: string;  // channel_name of the source
+  ts?: string;           // ts of the shared message
+  text: string;          // shared message body (may be empty)
+  files: SlackFileInfo[]; // files attached to the shared message
+}
+
+/** A file candidate collected from the triggering message, thread, or a forward. */
+export interface CollectedAttachment {
+  file: SlackFileInfo;
+  source: "message" | "thread" | "forward";
+}
+
+/** How an attachment is delivered to the agent. */
+export type AttachmentCategory = "audio" | "text-inline" | "text-file" | "binary";
 
 /** State for a single prompt turn within a session */
 export interface TurnState {
