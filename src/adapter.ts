@@ -444,6 +444,7 @@ export class SlackAdapter extends MessagingAdapter {
   private _channelCtxInjected = new Set<string>();
   private adapterDefaultOutputMode: OutputMode | undefined;
   private botUserId = "";
+  private botId = "";
   private slackConfig: SlackChannelConfig;
   private fileService!: FileServiceInterface;
   private settingsAPI?: SettingsAPI;
@@ -515,7 +516,8 @@ export class SlackAdapter extends MessagingAdapter {
       throw new Error("Slack auth.test() did not return user_id — verify botToken is valid");
     }
     this.botUserId = authResult.user_id as string;
-    this.log.info({ botUserId: this.botUserId }, "Slack bot authenticated");
+    this.botId = (authResult.bot_id as string | undefined) ?? "";
+    this.log.info({ botUserId: this.botUserId, botId: this.botId }, "Slack bot authenticated");
 
     this.channelManager = new SlackChannelManager(this.queue, this.slackConfig);
 
@@ -1378,6 +1380,8 @@ export class SlackAdapter extends MessagingAdapter {
           threadMessages,
           forwards: extras?.forwards,
           seen,
+          selfUserId: this.botUserId,
+          selfBotId: this.botId,
         });
 
         const payload = await buildAttachmentPayload({
