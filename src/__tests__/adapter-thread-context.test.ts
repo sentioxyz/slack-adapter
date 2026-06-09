@@ -75,6 +75,61 @@ describe("renderThreadContext", () => {
     expect(renderThreadContext([{ ts: "1", user: "U1", text: "only message" }], "1")).toBe("");
     expect(renderThreadContext([{ ts: "1", user: "U1", text: "  " }])).toBe("");
   });
+
+  it("renders Slack message attachments (e.g. a GitHub notification) even when text is empty", () => {
+    // GitHub/integration posts arrive as bot_message with empty top-level text;
+    // all content lives in the legacy `attachments[]` array. Without rendering it,
+    // an @mention in that thread sees nothing of what was posted.
+    const msgs: ThreadContextMessage[] = [
+      {
+        ts: "1",
+        bot_id: "B0B0W56N468",
+        text: "",
+        attachments: [
+          {
+            title: "OffchainLabs/nitro on GitHub",
+            text: "*nitro [Updated]* `v3.10.2`\nrelease notes here",
+          },
+        ],
+      },
+    ];
+    const out = renderThreadContext(msgs);
+    expect(out).toContain("<@B0B0W56N468>:");
+    expect(out).toContain("OffchainLabs/nitro on GitHub");
+    expect(out).toContain("release notes here");
+  });
+
+  it("combines message text and attachment content", () => {
+    const msgs: ThreadContextMessage[] = [
+      {
+        ts: "1",
+        user: "U1",
+        text: "see this",
+        attachments: [{ title: "A title", text: "attachment body" }],
+      },
+    ];
+    const out = renderThreadContext(msgs);
+    expect(out).toContain("<@U1>: see this");
+    expect(out).toContain("A title");
+    expect(out).toContain("attachment body");
+  });
+
+  it("falls back to an attachment's fallback when it has no structured fields", () => {
+    const msgs: ThreadContextMessage[] = [
+      { ts: "1", bot_id: "B1", text: "", attachments: [{ fallback: "plain summary" }] },
+    ];
+    expect(renderThreadContext(msgs)).toContain("plain summary");
+  });
+
+  it("still drops a message that has neither text nor renderable attachment content", () => {
+    const msgs: ThreadContextMessage[] = [
+      { ts: "1", user: "U1", text: "kept" },
+      { ts: "2", bot_id: "B1", text: "", attachments: [{}] },
+    ];
+    const out = renderThreadContext(msgs);
+    expect(out).toContain("<@U1>: kept");
+    expect(out).not.toContain("<@B1>");
+  });
 });
 
 describe("fetchThreadContext", () => {

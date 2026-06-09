@@ -100,12 +100,57 @@ export interface SettingsAPI {
 }
 
 /** A single Slack thread message, as far as thread-context rendering cares. */
+/**
+ * A Slack legacy message attachment (the `attachments[]` array on a message).
+ * Integrations such as GitHub, PagerDuty, CI bots etc. post their entire
+ * payload here with an empty top-level `text`, so this is where their content
+ * lives. Only the human-readable fields are modelled.
+ */
+export interface SlackMessageAttachment {
+  pretext?: string;
+  author_name?: string;
+  title?: string;
+  title_link?: string;
+  text?: string;
+  fields?: { title?: string; value?: string }[];
+  /** Plain-text summary integrations supply for clients that can't render the rich form. */
+  fallback?: string;
+}
+
 export interface ThreadContextMessage {
   ts?: string;
   user?: string;
   bot_id?: string;
   text?: string;
   files?: import("./types.js").SlackFileInfo[];
+  attachments?: SlackMessageAttachment[];
+}
+
+/**
+ * Flatten a Slack message's `attachments[]` into readable text. Prefers the
+ * structured fields (pretext / author / title / text / fields); when an
+ * attachment carries none of those it falls back to `fallback`. Returns "" when
+ * there is nothing renderable, so callers can treat it like empty text.
+ */
+export function renderMessageAttachments(attachments?: SlackMessageAttachment[]): string {
+  if (!attachments?.length) return "";
+  const blocks: string[] = [];
+  for (const att of attachments) {
+    const parts: string[] = [];
+    if (att.pretext) parts.push(att.pretext);
+    if (att.author_name) parts.push(att.author_name);
+    if (att.title) parts.push(att.title_link ? `${att.title} (${att.title_link})` : att.title);
+    if (att.text) parts.push(att.text);
+    for (const f of att.fields ?? []) {
+      const ft = (f.title ?? "").trim();
+      const fv = (f.value ?? "").trim();
+      if (ft || fv) parts.push(ft && fv ? `${ft}: ${fv}` : ft || fv);
+    }
+    const joined = parts.map((p) => String(p).trim()).filter(Boolean).join("\n");
+    const block = joined || (att.fallback ?? "").trim();
+    if (block) blocks.push(block);
+  }
+  return blocks.join("\n");
 }
 
 /**
@@ -127,9 +172,14 @@ export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?
     // Skip the triggering message — it's already dispatched as the user text.
     if (triggerTs && m.ts === triggerTs) continue;
     const text = (m.text ?? "").trim();
-    if (!text) continue;
+    // Integration posts (GitHub, CI, alerting bots) carry an empty top-level
+    // text and put everything in `attachments[]`; include that so an @mention
+    // in such a thread actually sees what was posted.
+    const attachmentText = renderMessageAttachments(m.attachments);
+    const body = [text, attachmentText].filter(Boolean).join("\n");
+    if (!body) continue;
     const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
-    lines.push(`${author}: ${text}`);
+    lines.push(`${author}: ${body}`);
   }
   if (lines.length === 0) return "";
 
