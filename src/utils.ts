@@ -9,6 +9,26 @@ export function isAudioClip(file: SlackFileInfo): boolean {
          file.mimetype?.startsWith("audio/");
 }
 
+/** Textual application/* subtypes that should be treated as text, not binary. */
+const TEXTUAL_APPLICATION_TYPES = new Set([
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/ecmascript",
+  "application/x-yaml",
+  "application/yaml",
+  "application/x-sh",
+  "application/x-httpd-php",
+  "application/sql",
+]);
+
+/** Detect text-like Slack files (inlineable or saveable as a text attachment). */
+export function isTextFile(file: SlackFileInfo): boolean {
+  const mime = file.mimetype ?? "";
+  if (mime.startsWith("text/")) return true;
+  return TEXTUAL_APPLICATION_TYPES.has(mime);
+}
+
 const SECTION_LIMIT = 3000;
 
 /**
