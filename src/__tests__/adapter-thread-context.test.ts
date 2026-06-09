@@ -99,17 +99,17 @@ describe("renderThreadContext", () => {
     expect(out).toContain("release notes here");
   });
 
-  it("combines message text and attachment content", () => {
+  it("combines a bot message's text and attachment content", () => {
     const msgs: ThreadContextMessage[] = [
       {
         ts: "1",
-        user: "U1",
+        bot_id: "B1",
         text: "see this",
         attachments: [{ title: "A title", text: "attachment body" }],
       },
     ];
     const out = renderThreadContext(msgs);
-    expect(out).toContain("<@U1>: see this");
+    expect(out).toContain("<@B1>: see this");
     expect(out).toContain("A title");
     expect(out).toContain("attachment body");
   });
@@ -119,6 +119,17 @@ describe("renderThreadContext", () => {
       { ts: "1", bot_id: "B1", text: "", attachments: [{ fallback: "plain summary" }] },
     ];
     expect(renderThreadContext(msgs)).toContain("plain summary");
+  });
+
+  it("does NOT render attachments on non-bot (human) messages — those are forwards handled elsewhere", () => {
+    // Human shares/forwards also populate attachments[], but extractForwards/
+    // forwardedTexts surfaces them; rendering here too would duplicate them.
+    const msgs: ThreadContextMessage[] = [
+      { ts: "1", user: "U1", text: "hi", attachments: [{ author_id: "U9", text: "forwarded content" }] },
+    ];
+    const out = renderThreadContext(msgs);
+    expect(out).toContain("<@U1>: hi");
+    expect(out).not.toContain("forwarded content");
   });
 
   it("still drops a message that has neither text nor renderable attachment content", () => {

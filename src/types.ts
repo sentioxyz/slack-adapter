@@ -93,6 +93,30 @@ export interface ForwardedMessage {
   files: SlackFileInfo[]; // files attached to the shared message
 }
 
+/**
+ * A raw Slack message `attachments[]` entry. Slack uses this both for a
+ * shared/forwarded message (author, source channel, text, and nested files —
+ * see {@link RawSlackAttachment.author_id}) and for rich integration posts
+ * (GitHub, CI, alerting bots) whose content lives in title/pretext/text/fields.
+ * Present both on incoming events and on messages returned by
+ * conversations.replies, so it can be read from any thread message.
+ */
+export interface RawSlackAttachment {
+  author_name?: string;
+  author_id?: string;
+  channel_name?: string;
+  ts?: string;
+  text?: string;
+  files?: SlackFileInfo[];
+  // Rich integration-post fields (GitHub release notes, CI summaries, etc.).
+  pretext?: string;
+  title?: string;
+  title_link?: string;
+  fields?: { title?: string; value?: string }[];
+  /** Plain-text summary integrations supply for clients that can't render the rich form. */
+  fallback?: string;
+}
+
 /** A file candidate collected from the triggering message, thread, or a forward. */
 export interface CollectedAttachment {
   file: SlackFileInfo;

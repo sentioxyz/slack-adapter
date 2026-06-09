@@ -123,7 +123,7 @@ export interface ThreadContextMessage {
   bot_id?: string;
   text?: string;
   files?: import("./types.js").SlackFileInfo[];
-  attachments?: SlackMessageAttachment[];
+  attachments?: import("./types.js").RawSlackAttachment[];
 }
 
 /**
@@ -131,8 +131,15 @@ export interface ThreadContextMessage {
  * structured fields (pretext / author / title / text / fields); when an
  * attachment carries none of those it falls back to `fallback`. Returns "" when
  * there is nothing renderable, so callers can treat it like empty text.
+ *
+ * Used to surface bot/integration posts (GitHub, CI, alerting bots) whose
+ * top-level text is empty. Human shares/forwards are handled separately by
+ * {@link extractForwards}, so the caller gates this to bot messages to avoid
+ * rendering the same forwarded content twice.
  */
-export function renderMessageAttachments(attachments?: SlackMessageAttachment[]): string {
+export function renderMessageAttachments(
+  attachments?: import("./types.js").RawSlackAttachment[],
+): string {
   if (!attachments?.length) return "";
   const blocks: string[] = [];
   for (const att of attachments) {
@@ -172,10 +179,13 @@ export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?
     // Skip the triggering message — it's already dispatched as the user text.
     if (triggerTs && m.ts === triggerTs) continue;
     const text = (m.text ?? "").trim();
-    // Integration posts (GitHub, CI, alerting bots) carry an empty top-level
-    // text and put everything in `attachments[]`; include that so an @mention
-    // in such a thread actually sees what was posted.
-    const attachmentText = renderMessageAttachments(m.attachments);
+    // Bot/integration posts (GitHub, CI, alerting bots) carry an empty top-level
+    // text and put everything in `attachments[]`; include that so an @mention in
+    // such a thread actually sees what was posted. Restricted to bot messages:
+    // human shares/forwards also live in `attachments[]` but are surfaced
+    // separately via extractForwards/forwardedTexts, so rendering them here too
+    // would duplicate them.
+    const attachmentText = m.bot_id ? renderMessageAttachments(m.attachments) : "";
     const body = [text, attachmentText].filter(Boolean).join("\n");
     if (!body) continue;
     const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
