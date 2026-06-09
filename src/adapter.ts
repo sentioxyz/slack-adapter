@@ -101,6 +101,7 @@ export interface ThreadContextMessage {
   user?: string;
   bot_id?: string;
   text?: string;
+  files?: import("./types.js").SlackFileInfo[];
 }
 
 /**
@@ -167,14 +168,19 @@ export function renderChannelContext(label: string, channelId: string, threadTs?
  * Exported as a pure function (enqueue + log injected) so the pagination and
  * truncation-logging behavior can be unit-tested without a live Slack client.
  */
-export async function fetchThreadContext(
+/**
+ * Page through a Slack thread via conversations.replies (oldest → newest,
+ * following the forward cursor) and return the raw messages. Pagination and
+ * truncation-logging behavior is shared by thread-context rendering and
+ * attachment collection. The Slack call is NOT wrapped — callers degrade.
+ */
+export async function fetchThreadMessages(
   enqueue: <T = unknown>(method: "conversations.replies", params: Record<string, unknown>) => Promise<T>,
   log: Logger,
   channelId: string,
   threadTs: string,
-  triggerTs?: string,
   maxPages = 10,
-): Promise<string> {
+): Promise<ThreadContextMessage[]> {
   const PAGE_LIMIT = 200;
   const collected: ThreadContextMessage[] = [];
   let cursor: string | undefined;
@@ -210,6 +216,18 @@ export async function fetchThreadContext(
     );
   }
 
+  return collected;
+}
+
+export async function fetchThreadContext(
+  enqueue: <T = unknown>(method: "conversations.replies", params: Record<string, unknown>) => Promise<T>,
+  log: Logger,
+  channelId: string,
+  threadTs: string,
+  triggerTs?: string,
+  maxPages = 10,
+): Promise<string> {
+  const collected = await fetchThreadMessages(enqueue, log, channelId, threadTs, maxPages);
   return renderThreadContext(collected, triggerTs);
 }
 
