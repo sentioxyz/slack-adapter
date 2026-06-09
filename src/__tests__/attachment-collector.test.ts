@@ -56,4 +56,52 @@ describe("collectAttachments", () => {
     expect(res.forwardedTexts).toHaveLength(0);
     expect(res.attachments.map((a) => a.file.id)).toEqual(["F4"]);
   });
+
+  it("extracts forwards from thread-history messages, not just the triggering message", () => {
+    // Real-world shape: the thread PARENT is a forward (empty body, content in
+    // `attachments`) and a SEPARATE reply @-mentions the bot. The triggering
+    // message itself carries no forwards.
+    const res = collectAttachments({
+      triggerFiles: [],
+      forwards: [],
+      threadMessages: [
+        {
+          attachments: [
+            {
+              author_name: "bob",
+              channel_name: "ops",
+              ts: "5",
+              text: "incident details",
+              files: [{ id: "FF", name: "trace.log", mimetype: "text/plain", size: 3, url_private: "https://files.slack.com/FF" }],
+            },
+          ],
+        },
+        { user: "U1", text: "@bot look" },
+      ],
+    });
+    expect(res.forwardedTexts.some((t) => t.includes("incident details"))).toBe(true);
+    const ff = res.attachments.find((a) => a.file.id === "FF");
+    expect(ff).toBeDefined();
+    expect(ff!.source).toBe("forward");
+  });
+
+  it("skips forwards inside bot messages in history", () => {
+    const res = collectAttachments({
+      threadMessages: [
+        { bot_id: "B1", attachments: [{ text: "bot forward", files: [file("FB")] }] },
+      ],
+    });
+    expect(res.forwardedTexts).toHaveLength(0);
+    expect(res.attachments).toHaveLength(0);
+  });
+
+  it("dedupes forwarded text shared by the triggering message and thread history", () => {
+    const res = collectAttachments({
+      forwards: [{ author: "alice", channelName: "incidents", ts: "1", text: "dup", files: [] }],
+      threadMessages: [
+        { attachments: [{ author_name: "alice", channel_name: "incidents", ts: "1", text: "dup" }] },
+      ],
+    });
+    expect(res.forwardedTexts.filter((t) => t.includes("dup"))).toHaveLength(1);
+  });
 });

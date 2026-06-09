@@ -106,6 +106,7 @@ export interface ThreadContextMessage {
   bot_id?: string;
   text?: string;
   files?: import("./types.js").SlackFileInfo[];
+  attachments?: import("./types.js").RawSlackAttachment[];
 }
 
 /**
