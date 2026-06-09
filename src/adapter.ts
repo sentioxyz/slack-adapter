@@ -25,7 +25,8 @@ import type {
 } from "@openacp/plugin-sdk";
 import { SlackRenderer } from "./renderer.js";
 import type { SlackChannelConfig, Logger } from "./types.js";
-import type { SlackSessionMeta, SlackFileInfo } from "./types.js";
+import type { SlackSessionMeta, SlackFileInfo, CollectedAttachment } from "./types.js";
+import { classifyAttachment } from "./attachment-classifier.js";
 import { SlackSendQueue } from "./send-queue.js";
 import { SlackFormatter } from "./formatter.js";
 import { SlackChannelManager } from "./channel-manager.js";
@@ -134,6 +135,78 @@ export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?
     ...lines,
     "[End thread context]",
   ].join("\n");
+}
+
+/** Total bytes of inlined text allowed before remaining text is demoted to a
+ * download link, to keep the prompt from ballooning. */
+const INLINE_TEXT_BUDGET = 50_000;
+
+export interface BuildAttachmentPayloadInput {
+  sessionId: string;
+  inlineMaxBytes: number;
+  collected: CollectedAttachment[];
+  forwardedTexts: string[];
+  /** Download bytes for a file's url_private (auth handled by caller). */
+  download: (url: string) => Promise<Buffer | null>;
+  /** Persist a buffer as a session Attachment. */
+  saveFile: (sessionId: string, fileName: string, data: Buffer, mimeType: string) => Promise<Attachment>;
+  /** Register a binary with the proxy and return a download URL. */
+  registerProxy: (file: SlackFileInfo) => string;
+  log: Logger;
+}
+
+export interface BuildAttachmentPayloadResult {
+  promptAdditions: string;
+  attachments: Attachment[];
+  /** Ids successfully surfaced this turn (added to the per-thread seen-set). */
+  surfacedIds: string[];
+}
+
+export async function buildAttachmentPayload(
+  input: BuildAttachmentPayloadInput,
+): Promise<BuildAttachmentPayloadResult> {
+  const attachments: Attachment[] = [];
+  const surfacedIds: string[] = [];
+  const inlineBlocks: string[] = [...input.forwardedTexts];
+  const linkLines: string[] = [];
+  let inlineUsed = 0;
+
+  for (const { file } of input.collected) {
+    const category = classifyAttachment(file, { inlineMaxBytes: input.inlineMaxBytes });
+    try {
+      if (category === "text-inline" && inlineUsed + (file.size ?? 0) <= INLINE_TEXT_BUDGET) {
+        const buf = await input.download(file.url_private);
+        if (!buf) continue;
+        inlineUsed += buf.length;
+        inlineBlocks.push(`--- Attachment: ${file.name} (${file.mimetype}, ${file.size}B) ---\n${buf.toString("utf8")}`);
+        surfacedIds.push(file.id);
+      } else if (category === "text-file" || category === "audio") {
+        const buf = await input.download(file.url_private);
+        if (!buf) continue;
+        const mime = file.mimetype === "video/mp4" ? "audio/mp4" : file.mimetype;
+        const att = await input.saveFile(input.sessionId, file.name, buf, mime);
+        attachments.push(att);
+        surfacedIds.push(file.id);
+      } else {
+        // binary (or inline text over budget) → lazy proxy link
+        const url = input.registerProxy(file);
+        linkLines.push(`- ${file.name} (${file.mimetype}, ${file.size}B): ${url}`);
+        surfacedIds.push(file.id);
+      }
+    } catch (err) {
+      input.log.warn({ err, file: file.name }, "Failed to materialize attachment; skipping");
+    }
+  }
+
+  const sections: string[] = [];
+  if (inlineBlocks.length) sections.push(inlineBlocks.join("\n\n"));
+  if (linkLines.length) {
+    sections.push(
+      "[Attachments available for download — no auth required, fetch with curl/WebFetch if needed:]\n" +
+        linkLines.join("\n"),
+    );
+  }
+  return { promptAdditions: sections.join("\n\n"), attachments, surfacedIds };
 }
 
 /**
