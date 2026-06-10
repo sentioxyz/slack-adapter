@@ -117,6 +117,7 @@ export class SlackEventRouter implements ISlackEventRouter {
           hasThreadSession: this.hasThreadSession ?? (() => false),
           mentionAnyChannel: this.config.mentionAnyChannel ?? false,
           respondToDms: this.config.respondToDms,
+          allowedBotIds: this.config.allowedBotIds ?? [],
         },
       );
       if (cls.kind !== "ignore") {

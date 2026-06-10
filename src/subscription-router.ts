@@ -37,6 +37,13 @@ export interface SubscriptionContext {
    * false, DMs are ignored.
    */
   respondToDms?: boolean;
+  /**
+   * Slack `bot_id`s allowed to trigger this bot. A message authored by another
+   * app/bot (it carries a `bot_id`) is normally ignored to prevent loops; a
+   * `bot_id` listed here is honored, but ONLY when the message also @mentions
+   * this bot. Empty (default) → all bot messages ignored, the legacy behavior.
+   */
+  allowedBotIds?: string[];
 }
 
 export type Classification =
@@ -83,12 +90,26 @@ export function stripBotMention(text: string, botUserId: string): string {
  * threads.
  */
 export function classifySubscription(msg: SubscriptionMessage, ctx: SubscriptionContext): Classification {
-  if (msg.bot_id) return { kind: "ignore" };
-  if (msg.subtype && msg.subtype !== "file_share") return { kind: "ignore" };
+  const fromBot = Boolean(msg.bot_id);
+  if (fromBot) {
+    // Bot-authored messages are ignored unless the bot is explicitly whitelisted
+    // AND the message @mentions us — a loop-safe opt-in. Bot posts use the
+    // `bot_message` subtype, which we must allow here (the generic subtype gate
+    // below would otherwise drop them).
+    if (!(ctx.allowedBotIds ?? []).includes(msg.bot_id!)) return { kind: "ignore" };
+    if (msg.subtype && msg.subtype !== "file_share" && msg.subtype !== "bot_message") {
+      return { kind: "ignore" };
+    }
+    if (!mentionsBot(msg.text ?? "", ctx.botUserId)) return { kind: "ignore" };
+  } else if (msg.subtype && msg.subtype !== "file_share") {
+    return { kind: "ignore" };
+  }
 
   const channelId = msg.channel;
-  const userId = msg.user ?? "";
-  if (!userId || userId === ctx.botUserId) return { kind: "ignore" };
+  // A bot has no `user`; identify it by its `bot_id` so the session has a stable
+  // author. The self-mute (userId === botUserId) only applies to human messages.
+  const userId = msg.user ?? msg.bot_id ?? "";
+  if (!userId || (!fromBot && userId === ctx.botUserId)) return { kind: "ignore" };
 
   // Resolve the effective subscription. Explicit `subscribedChannels` entries
   // win (they may set `trigger: "all"`). Otherwise:
@@ -106,7 +127,9 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
   }
   if (!sub) return { kind: "ignore" };
 
-  if (ctx.allowedUserIds.length > 0 && !ctx.allowedUserIds.includes(userId)) {
+  // allowedUserIds gates humans only; a whitelisted bot already passed its own
+  // (allowedBotIds + mention) gate above.
+  if (!fromBot && ctx.allowedUserIds.length > 0 && !ctx.allowedUserIds.includes(userId)) {
     return { kind: "ignore" };
   }
 
