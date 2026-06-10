@@ -26,6 +26,38 @@ describe("classifySubscription", () => {
     expect(classifySubscription({ channel: "C_SUB", user: "U1", text: "hi", ts: "1.1", bot_id: "B1" }, ctx()).kind).toBe("ignore");
   });
 
+  it("starts a session for a whitelisted bot that @mentions us (bot_message subtype)", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "<@BOT1> beacon-kit v1.4.0 released", ts: "169.1", bot_id: "B_OK", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"] }),
+    );
+    expect(r).toEqual({ kind: "sub-start", channelId: "C_SUB", threadTs: "169.1", userId: "B_OK", text: "beacon-kit v1.4.0 released" });
+  });
+
+  it("ignores a whitelisted bot when it does NOT @mention us", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "beacon-kit v1.4.0 released", ts: "169.1", bot_id: "B_OK", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"] }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("ignores a non-whitelisted bot even when it @mentions us", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "<@BOT1> hi", ts: "169.1", bot_id: "B_OTHER", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"] }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("does not apply allowedUserIds to a whitelisted bot", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "<@BOT1> go", ts: "169.1", bot_id: "B_OK", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"], allowedUserIds: ["U_ONLY_HUMAN"] }),
+    );
+    expect(r.kind).toBe("sub-start");
+  });
+
   it("ignores edited/deleted subtypes but allows file_share", () => {
     expect(classifySubscription({ channel: "C_SUB", user: "U1", text: "x", ts: "1.1", subtype: "message_changed" }, ctx()).kind).toBe("ignore");
     const r = classifySubscription({ channel: "C_SUB", user: "U1", text: "<@BOT1> x", ts: "1.1", subtype: "file_share" }, ctx());

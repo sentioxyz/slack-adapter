@@ -49,6 +49,15 @@ export const SlackChannelConfigSchema = z.object({
    */
   respondToDms: z.boolean().default(true),
   /**
+   * Slack `bot_id`s whose messages are allowed to trigger this bot. By default
+   * the adapter ignores every message authored by another app/bot (they carry a
+   * `bot_id`) to prevent bot-to-bot loops. List a `bot_id` here to make a
+   * loop-safe exception: a message from that bot is honored ONLY when it also
+   * @mentions this bot, so a notifier (e.g. a changelog/release bot) can hand
+   * work to us while two ordinary bots can never trigger each other by accident.
+   */
+  allowedBotIds: z.array(z.string()).default([]),
+  /**
    * Text files at or below this size (bytes) are inlined into the prompt;
    * larger text files are saved as file attachments. Default 16 KiB.
    */
