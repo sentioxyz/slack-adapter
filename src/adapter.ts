@@ -37,6 +37,7 @@ import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { resolveThreadSession } from "./subscription-router.js";
+import { ReactionTracker } from "./reaction-tracker.js";
 import { SlackFileProxy } from "./file-proxy.js";
 import { collectAttachments } from "./attachment-collector.js";
 import { isSlackFileUrl } from "./utils.js";
@@ -508,6 +509,7 @@ export class SlackAdapter extends MessagingAdapter {
   private app!: App;
   private webClient!: WebClient;
   private queue!: SlackSendQueue;
+  private reactions!: ReactionTracker;
   private formatter: SlackFormatter;
   private channelManager!: SlackChannelManager;
   private permissionHandler!: SlackPermissionHandler;
@@ -595,6 +597,11 @@ export class SlackAdapter extends MessagingAdapter {
 
     this.webClient = new WebClient(botToken);
     this.queue = new SlackSendQueue(this.webClient);
+    this.reactions = new ReactionTracker(
+      (method, params) => this.queue.enqueue(method, params),
+      this.slackConfig.processingReaction ?? "eyes",
+      this.log,
+    );
     this.fileService = this.core.fileService;
 
     // Start the lazy file proxy (best-effort — must not block startup). It
@@ -726,11 +733,12 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files, forwards) => {
+      (sessionChannelSlug, text, userId, files, forwards, ts) => {
         const meta = [...this.sessions.values()].find((m) => m.channelSlug === sessionChannelSlug);
         return this.dispatchToSession(sessionChannelSlug, text, userId, files, {
           channelId: meta?.channelId,
           threadTs: meta?.threadTs,
+          triggerTs: ts,
           forwards,
         });
       },
@@ -791,7 +799,7 @@ export class SlackAdapter extends MessagingAdapter {
       // onSubscriptionMessage: bind the thread to a session and dispatch
       async (channelId, threadTs, userId, text, files, opts) => {
         try {
-          const { meta } = await resolveThreadSession(
+          const { sessionId, meta } = await resolveThreadSession(
             {
               sessions: this.sessions,
               getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
@@ -824,7 +832,23 @@ export class SlackAdapter extends MessagingAdapter {
             threadTs,
             triggerTs: opts?.triggerTs,
             forwards: opts?.forwards,
+            lastDeliveredTs: meta.lastDeliveredTs,
           });
+
+          // Advance the gap-backfill watermark: everything up to and including
+          // this trigger has now been delivered (skipped messages in between
+          // were just backfilled by dispatchToSession). Persisted so backfill
+          // keeps working across restarts.
+          if (opts?.triggerTs) {
+            meta.lastDeliveredTs = opts.triggerTs;
+            try {
+              await this.core.sessionManager.patchRecord(sessionId, {
+                platform: { channelId, topicId: meta.channelSlug, threadTs, lastDeliveredTs: opts.triggerTs },
+              });
+            } catch (patchErr) {
+              this.log.warn({ err: patchErr, sessionId }, "Failed to persist lastDeliveredTs");
+            }
+          }
         } catch (err) {
           this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
         }
@@ -1159,6 +1183,7 @@ export class SlackAdapter extends MessagingAdapter {
     this._waitingNoticeTs.delete(sessionId);
     this._channelCtxInjected.delete(sessionId);
     this.surfacedFiles.delete(meta.channelSlug);
+    this.reactions.clear(meta.channelSlug);
   }
 
   /**
@@ -1446,31 +1471,46 @@ export class SlackAdapter extends MessagingAdapter {
     text: string,
     userId: string,
     files?: SlackFileInfo[],
-    extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[] },
+    extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[]; lastDeliveredTs?: string },
   ): Promise<void> {
     if (text.startsWith("/")) {
       const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
       if (handled) return;
     }
 
+    // Processing indicator: mark the triggering message as seen. Fire-and-forget —
+    // a reaction failure must never block or fail the dispatch.
+    if (extras?.channelId && extras?.triggerTs) {
+      this.reactions.add(sessionChannelSlug, extras.channelId, extras.triggerTs);
+    }
+
     let dispatchText = text;
     let attachments: Attachment[] | undefined;
 
     try {
+      // One thread fetch serves BOTH gap backfill and attachment collection.
+      // readThreadHistory: false means "don't walk the thread" and disables both.
+      let threadMessages: ThreadContextMessage[] | undefined;
+      if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
+        try {
+          threadMessages = await fetchThreadMessages(
+            (method: any, params: any) => this.queue.enqueue(method, params),
+            this.log, extras.channelId, extras.threadTs,
+          );
+        } catch (err) {
+          this.log.warn({ err }, "Failed to fetch thread history; dispatching without gap backfill or thread attachments");
+        }
+      }
+
+      // Gap backfill: prepend thread messages the agent never saw (skipped
+      // replies, downtime) since the lastDeliveredTs watermark.
+      if (threadMessages && extras?.lastDeliveredTs) {
+        const gap = renderGapContext(threadMessages, extras.lastDeliveredTs, this.botUserId, extras.triggerTs);
+        if (gap) dispatchText = `${gap}\n\n${dispatchText}`;
+      }
+
       const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
       if (sessionId && this.fileProxy) {
-        let threadMessages: ThreadContextMessage[] | undefined;
-        if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
-          try {
-            threadMessages = await fetchThreadMessages(
-              (method: any, params: any) => this.queue.enqueue(method, params),
-              this.log, extras.channelId, extras.threadTs,
-            );
-          } catch (err) {
-            this.log.warn({ err }, "Failed to fetch thread history for attachments; using triggering message only");
-          }
-        }
-
         const seen = this.surfacedFiles.get(sessionChannelSlug) ?? new Set<string>();
         const { attachments: collected, forwardedTexts } = collectAttachments({
           triggerFiles: files,
@@ -1493,7 +1533,7 @@ export class SlackAdapter extends MessagingAdapter {
         for (const id of payload.surfacedIds) seen.add(id);
         this.surfacedFiles.set(sessionChannelSlug, seen);
 
-        if (payload.promptAdditions) dispatchText = `${text}\n\n${payload.promptAdditions}`;
+        if (payload.promptAdditions) dispatchText = `${dispatchText}\n\n${payload.promptAdditions}`;
         if (payload.attachments.length) attachments = payload.attachments;
       }
     } catch (err) {
@@ -1576,6 +1616,10 @@ export class SlackAdapter extends MessagingAdapter {
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
+
+    // Turn complete → agent idle: clear the processing reaction (fire-and-forget).
+    void this.reactions.remove(meta.channelSlug);
+
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -1607,6 +1651,10 @@ export class SlackAdapter extends MessagingAdapter {
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
+
+    // Turn complete → agent idle: clear the processing reaction (fire-and-forget).
+    void this.reactions.remove(meta.channelSlug);
+
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
