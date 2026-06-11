@@ -71,6 +71,20 @@ export function mentionsBot(text: string, botUserId: string): boolean {
   return new RegExp(`<@${botUserId}(\\|[^>]+)?>`).test(text);
 }
 
+/**
+ * True when `text` mentions someone OTHER than the given bot: another user/bot
+ * (`<@U…>`, `<@W…>`, with or without `|label`), a broadcast (`<!here>`,
+ * `<!channel>`, `<!everyone>`), or a user group (`<!subteam^…>`). Used to gate
+ * owned-thread replies: such a reply is probably addressed to that someone,
+ * not to this bot.
+ */
+export function mentionsOthers(text: string, botUserId: string): boolean {
+  for (const m of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]+)?>/g)) {
+    if (m[1] !== botUserId) return true;
+  }
+  return /<!(?:here|channel|everyone)(?:\|[^>]+)?>|<!subteam\^[^>]+>/.test(text);
+}
+
 /** Remove the bot's own mention token(s) and collapse the resulting whitespace. */
 export function stripBotMention(text: string, botUserId: string): string {
   return text

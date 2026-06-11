@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { classifySubscription } from "../subscription-router.js";
+import { classifySubscription, mentionsOthers } from "../subscription-router.js";
 import type { SubscriptionContext } from "../subscription-router.js";
 import { resolveThreadSession } from "../subscription-router.js";
 import type { ThreadSessionDeps } from "../subscription-router.js";
@@ -229,6 +229,42 @@ describe("classifySubscription", () => {
     const r = classifySubscription({ channel: "C_SUB", user: "U1", text: "<@BOT1> go", ts: "169.1" }, ctx());
     expect(r.kind).toBe("sub-start");
     expect((r as { midThread?: boolean }).midThread).toBeUndefined();
+  });
+});
+
+describe("mentionsOthers", () => {
+  it("detects a mention of another user", () => {
+    expect(mentionsOthers("<@U2> can you check?", "BOT1")).toBe(true);
+  });
+
+  it("detects labeled and enterprise-style mentions", () => {
+    expect(mentionsOthers("<@U2|alice> please", "BOT1")).toBe(true);
+    expect(mentionsOthers("<@W2ENT> please", "BOT1")).toBe(true);
+  });
+
+  it("does not count the bot's own mention (bare or labeled)", () => {
+    expect(mentionsOthers("<@BOT1> do it", "BOT1")).toBe(false);
+    expect(mentionsOthers("<@BOT1|openacp> do it", "BOT1")).toBe(false);
+  });
+
+  it("returns true when the bot AND someone else are mentioned", () => {
+    expect(mentionsOthers("<@BOT1> and <@U2> look", "BOT1")).toBe(true);
+  });
+
+  it("detects broadcast mentions (bare and labeled)", () => {
+    expect(mentionsOthers("<!here> anyone?", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!here|here> anyone?", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!channel> heads up", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!everyone> hi", "BOT1")).toBe(true);
+  });
+
+  it("detects user-group mentions", () => {
+    expect(mentionsOthers("<!subteam^S123ABC|@oncall> ping", "BOT1")).toBe(true);
+  });
+
+  it("returns false for plain text and non-mention markup", () => {
+    expect(mentionsOthers("just words", "BOT1")).toBe(false);
+    expect(mentionsOthers("a link <https://x.y|label>", "BOT1")).toBe(false);
   });
 });
 
