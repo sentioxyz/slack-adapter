@@ -3,6 +3,8 @@
 // currently working on. add() marks a triggering message as seen; remove() is
 // called at turn end and clears the OLDEST outstanding reaction (FIFO — matches
 // core's FIFO prompt queue, so each turn-end clears its own trigger).
+// Every add() must be balanced by exactly one remove() at turn end; clear() is
+// the teardown escape hatch for sessions ending abnormally.
 // In-memory only: a crash mid-turn leaves the reaction behind (accepted).
 import type { Logger } from "./types.js";
 
@@ -48,6 +50,11 @@ export class ReactionTracker {
     const list = this.pending.get(sessionKey) ?? [];
     list.push({ channel, ts, added });
     this.pending.set(sessionKey, list);
+  }
+
+  /** Session torn down: forget its outstanding reactions without touching Slack. */
+  clear(sessionKey: string): void {
+    this.pending.delete(sessionKey);
   }
 
   /** Turn ended: remove the oldest outstanding reaction for this session. */

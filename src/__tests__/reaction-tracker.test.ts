@@ -77,6 +77,24 @@ describe("ReactionTracker", () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
+  it("clear() drops pending entries without calling Slack", async () => {
+    const { tracker, enqueue } = makeTracker();
+    tracker.add("sess-1", "C1", "100.1");
+    tracker.clear("sess-1");
+    await tracker.remove("sess-1");
+    expect(enqueue.mock.calls.filter(([m]) => m === "reactions.remove")).toHaveLength(0);
+  });
+
+  it("concurrent remove() calls pop distinct entries", async () => {
+    const { tracker, enqueue } = makeTracker();
+    tracker.add("sess-1", "C1", "100.1");
+    tracker.add("sess-1", "C1", "100.2");
+    await Promise.all([tracker.remove("sess-1"), tracker.remove("sess-1")]);
+    const removes = enqueue.mock.calls.filter(([m]) => m === "reactions.remove").map(([, p]) => p);
+    expect(removes).toHaveLength(2);
+    expect(new Set(removes.map((p: any) => p.timestamp))).toEqual(new Set(["100.1", "100.2"]));
+  });
+
   it("removes only after its add has settled (no add-after-remove race)", async () => {
     const order: string[] = [];
     let releaseAdd!: () => void;
