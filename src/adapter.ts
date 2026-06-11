@@ -41,6 +41,7 @@ import { SlackFileProxy } from "./file-proxy.js";
 import { collectAttachments } from "./attachment-collector.js";
 import { isSlackFileUrl } from "./utils.js";
 import type { ForwardedMessage } from "./types.js";
+import { enqueueWithMarkdownFallback } from "./markdown-post.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -1747,12 +1748,12 @@ export class SlackAdapter extends MessagingAdapter {
     if (blocks.length === 0) return;
 
     try {
-      await this.queue.enqueue("chat.postMessage", {
+      await enqueueWithMarkdownFallback(this.queue, "chat.postMessage", {
         channel: meta.channelId,
         ...this.threadParams(meta),
         text: content.text ?? content.type,
         blocks,
-      });
+      }, this.log);
     } catch (err) {
       this.log.error({ err, sessionId, type: content.type }, "Failed to post Slack message");
     }

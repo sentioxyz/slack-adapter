@@ -5,10 +5,11 @@ import { SlackFormatter, markdownToMrkdwn } from "../formatter.js";
 const fmt = new SlackFormatter();
 
 describe("SlackFormatter.formatOutgoing", () => {
-  it("text message returns section blocks", () => {
-    const blocks = fmt.formatOutgoing({ type: "text", text: "Hello" } as any);
+  it("text message returns a single markdown block with raw text", () => {
+    const blocks = fmt.formatOutgoing({ type: "text", text: "# Hi\n\n**bold** | table |" } as any);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("section");
+    expect(blocks[0].type).toBe("markdown");
+    expect((blocks[0] as any).text).toBe("# Hi\n\n**bold** | table |"); // raw passthrough, no conversion
   });
 
   it("thought returns empty array (delegated to ActivityTracker)", () => {
@@ -36,11 +37,19 @@ describe("SlackFormatter.formatOutgoing", () => {
     expect(blocks).toEqual([]);
   });
 
-  it("long text (>3000 chars) is split into multiple sections", () => {
-    const long = "x".repeat(4000);
+  it("text up to the markdown limit stays a single markdown block", () => {
+    const long = "x".repeat(4000); // > old 3000 section limit, < 11500
+    const blocks = fmt.formatOutgoing({ type: "text", text: long } as any);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("markdown");
+  });
+
+  it("oversize text (> MARKDOWN_SAFE_LIMIT) falls back to mrkdwn sections", () => {
+    const long = "**b** ".repeat(2500); // 15000 chars > 11500
     const blocks = fmt.formatOutgoing({ type: "text", text: long } as any);
     expect(blocks.length).toBeGreaterThan(1);
-    blocks.forEach(b => expect(b.type).toBe("section"));
+    for (const b of blocks) expect(b.type).toBe("section");
+    expect((blocks[0] as any).text.text).toContain("*b*"); // converted
   });
 
   it("unknown type returns empty array", () => {

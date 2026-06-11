@@ -4,10 +4,20 @@
 
 import type { ISlackSendQueue } from "./send-queue.js";
 import type { Logger } from "./types.js";
-import { markdownToMrkdwn } from "./formatter.js";
-import { splitSafe } from "./utils.js";
+import { splitMarkdownSafe } from "./utils.js";
+import { enqueueWithMarkdownFallback, markdownBlock } from "./markdown-post.js";
 
 const FLUSH_IDLE_MS = 2000; // flush after 2s of no new chunks
+
+/** Remove [TTS]...[/TTS] blocks; tidy the seam without flattening markdown
+ * structure (newlines are significant in markdown blocks). */
+function stripTts(text: string): string {
+  return text
+    .replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "")
+    .replace(/[ \t]{2,}/g, " ")   // collapse runs of spaces/tabs only
+    .replace(/\n{3,}/g, "\n\n")   // cap blank-line runs left by the removal
+    .trim();
+}
 
 export class SlackTextBuffer {
   private buffer = "";
@@ -50,17 +60,21 @@ export class SlackTextBuffer {
 
     this.flushPromise = (async () => {
       try {
-        const converted = markdownToMrkdwn(text);
-        const chunks = splitSafe(converted);
+        const chunks = splitMarkdownSafe(text);
         for (const chunk of chunks) {
           if (!chunk.trim()) continue;
-          const result = await this.queue.enqueue("chat.postMessage", {
+          const result = await enqueueWithMarkdownFallback(this.queue, "chat.postMessage", {
             channel: this.channelId,
             ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+            // `text` doubles as the notification fallback AND the thread-context
+            // source other agents read back — always the full raw chunk.
             text: chunk,
-            blocks: [{ type: "section", text: { type: "mrkdwn", text: chunk } }],
-          });
-          // Track last posted message for potential TTS block editing
+            blocks: [markdownBlock(chunk)],
+          }, this.log);
+          // Track last posted message for potential TTS block editing.
+          // Note: only the final chunk of a multi-chunk flush is editable here;
+          // a TTS marker buried in an earlier chunk of a >11.5k response won't
+          // be stripped (acceptable: TTS blocks are short and come at the end).
           this.lastMessageTs = (result as { ts?: string } | undefined)?.ts;
           this.lastPostedText = chunk;
         }
@@ -85,20 +99,20 @@ export class SlackTextBuffer {
   async stripTtsBlock(): Promise<void> {
     // Case 1: TTS block still in unflushed buffer
     if (/\[TTS\][\s\S]*?\[\/TTS\]/.test(this.buffer)) {
-      this.buffer = this.buffer.replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "").replace(/\s{2,}/g, " ").trim();
+      this.buffer = stripTts(this.buffer);
       return;
     }
 
     // Case 2: Already flushed — edit the posted message via chat.update
     if (this.lastMessageTs && this.lastPostedText && /\[TTS\][\s\S]*?\[\/TTS\]/.test(this.lastPostedText)) {
-      const cleaned = this.lastPostedText.replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "").replace(/\s{2,}/g, " ").trim();
+      const cleaned = stripTts(this.lastPostedText);
       if (cleaned) {
-        await this.queue.enqueue("chat.update", {
+        await enqueueWithMarkdownFallback(this.queue, "chat.update", {
           channel: this.channelId,
           ts: this.lastMessageTs,
           text: cleaned,
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: cleaned } }],
-        });
+          blocks: [markdownBlock(cleaned)],
+        }, this.log);
       }
       this.lastPostedText = cleaned;
     }
