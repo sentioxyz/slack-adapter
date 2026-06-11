@@ -3,16 +3,22 @@
 // currently working on. add() marks a triggering message as seen; remove() is
 // called at turn end and clears the OLDEST outstanding reaction (FIFO — matches
 // core's FIFO prompt queue, so each turn-end clears its own trigger).
-// Every add() must be balanced by exactly one remove() at turn end; clear() is
-// the teardown escape hatch for sessions ending abnormally.
+// removeAll() is called on terminal session_end and drains every outstanding
+// reaction for the session. clear() is the teardown escape hatch for sessions
+// ending abnormally without Slack cleanup.
 // In-memory only: a crash mid-turn leaves the reaction behind (accepted).
 //
-// FIFO assumption verified: core emits session_end once per session (it
-// terminates the session's state machine — session.finish() transitions to the
-// terminal "finished" state). A single remove() at handleSessionEnd therefore
-// drains exactly the one outstanding reaction for the final prompt. No N-1 leak
-// is possible because the session ends after the prompt that produced session_end;
-// any queued prompts behind it are never executed.
+// session_end vs error model (verified against @openacp/cli core):
+// session_end is TERMINAL — SessionBridge calls session.finish(), which drives
+// the state machine to the "finished" state (no outgoing transitions).
+// processPrompt early-returns on finished sessions, so a live session delivers
+// AT MOST ONE session_end. Thread sessions continue across turns via lazy
+// resume: each later reply resumes the persisted record into a NEW live
+// session. Therefore turn end must drain ALL outstanding reactions via
+// removeAll(), not just one — a single pop would leak any reaction beyond the
+// first if multiple messages were dispatched in the same live session.
+// error, by contrast, is recoverable (error → active is a valid transition),
+// so popping one reaction per error is correct.
 import type { Logger } from "./types.js";
 
 export type ReactionEnqueue = (
@@ -78,6 +84,17 @@ export class ReactionTracker {
       const code = slackErrorCode(err);
       if (code === "no_reaction" || code === "message_not_found") return;
       this.log.warn({ err, channel: ref.channel, ts: ref.ts }, "Failed to remove processing reaction");
+    }
+  }
+
+  /**
+   * Session finished (terminal `session_end`): remove every outstanding
+   * reaction for this session. A live session delivers at most one
+   * session_end, so per-entry pops would leak any reaction beyond the first.
+   */
+  async removeAll(sessionKey: string): Promise<void> {
+    while (this.pending.get(sessionKey)?.length) {
+      await this.remove(sessionKey);
     }
   }
 }

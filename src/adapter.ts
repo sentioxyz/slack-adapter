@@ -1641,8 +1641,10 @@ export class SlackAdapter extends MessagingAdapter {
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
 
-    // Turn complete → agent idle: clear the processing reaction (fire-and-forget).
-    void this.reactions.remove(meta.channelSlug);
+    // Turn over (terminal session_end): clear ALL outstanding processing reactions.
+    // A live session emits at most one session_end; thread sessions resume as fresh
+    // live sessions per turn, so every reaction queued this turn must be drained now.
+    void this.reactions.removeAll(meta.channelSlug);
 
     await this.flushTextBuffer(sessionId);
 

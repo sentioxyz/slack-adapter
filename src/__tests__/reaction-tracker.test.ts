@@ -95,6 +95,22 @@ describe("ReactionTracker", () => {
     expect(new Set(removes.map((p: any) => p.timestamp))).toEqual(new Set(["100.1", "100.2"]));
   });
 
+  it("removeAll() drains every outstanding reaction for the session", async () => {
+    const { tracker, enqueue } = makeTracker();
+    tracker.add("sess-1", "C1", "100.1");
+    tracker.add("sess-1", "C1", "100.2");
+    tracker.add("sess-2", "C2", "200.1");
+    await tracker.removeAll("sess-1");
+    const removes = enqueue.mock.calls.filter(([m]) => m === "reactions.remove").map(([, p]: any[]) => p.timestamp);
+    expect(removes).toEqual(["100.1", "100.2"]);
+  });
+
+  it("removeAll() on an empty session is a no-op", async () => {
+    const { tracker, enqueue } = makeTracker();
+    await tracker.removeAll("sess-1");
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it("removes only after its add has settled (no add-after-remove race)", async () => {
     const order: string[] = [];
     let releaseAdd!: () => void;
