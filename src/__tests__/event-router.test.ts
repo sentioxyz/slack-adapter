@@ -120,7 +120,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C123", user: "U1", text: "hello" } });
 
-    expect(onIncoming).toHaveBeenCalledWith("openacp-session-abc1", "hello", "U1", undefined, []);
+    expect(onIncoming).toHaveBeenCalledWith("openacp-session-abc1", "hello", "U1", undefined, [], undefined);
     expect(onNewSession).not.toHaveBeenCalled();
   });
 
@@ -150,6 +150,7 @@ describe("SlackEventRouter", () => {
       "U1",
       [{ id: "F1", name: "audio_message_abc.mp4", mimetype: "video/mp4", size: 1024, url_private: "https://files.slack.com/F1" }],
       [],
+      undefined,
     );
   });
 
@@ -231,7 +232,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> hi", ts: "169.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: undefined, forwards: [] });
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: "169.1", forwards: [] });
     expect(onIncoming).not.toHaveBeenCalled();
     expect(onNewSession).not.toHaveBeenCalled();
   });
@@ -249,7 +250,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "more", ts: "169.2", thread_ts: "169.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "more", undefined, { forwards: [] });
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "more", undefined, { triggerTs: "169.2", forwards: [] });
   });
 
   it("leaves legacy routing unchanged for non-subscribed channels", async () => {
@@ -267,7 +268,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C123", user: "U1", text: "hello" } });
 
-    expect(onIncoming).toHaveBeenCalledWith("openacp-session-abc1", "hello", "U1", undefined, []);
+    expect(onIncoming).toHaveBeenCalledWith("openacp-session-abc1", "hello", "U1", undefined, [], undefined);
     expect(onSubscription).not.toHaveBeenCalled();
   });
 
@@ -285,7 +286,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "hello", ts: "1.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "hello", undefined, { midThread: undefined, triggerTs: undefined, forwards: [] });
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "hello", undefined, { midThread: undefined, triggerTs: "1.1", forwards: [] });
     expect(onNewSession).not.toHaveBeenCalled();
     expect(onIncoming).not.toHaveBeenCalled();
   });
@@ -301,7 +302,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "D123", user: "U1", text: "more", ts: "1.2", thread_ts: "1.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "more", undefined, { forwards: [] });
+    expect(onSubscription).toHaveBeenCalledWith("D123", "1.1", "U1", "more", undefined, { triggerTs: "1.2", forwards: [] });
   });
 
   it("does not route DMs when respondToDms is false", async () => {
@@ -347,7 +348,7 @@ describe("SlackEventRouter", () => {
 
     await app._trigger("message", { message: { channel: "C_SUB", user: "U1", text: "<@BOT1> hi", ts: "169.1" } });
 
-    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: undefined, forwards: [] });
+    expect(onSubscription).toHaveBeenCalledWith("C_SUB", "169.1", "U1", "hi", undefined, { midThread: undefined, triggerTs: "169.1", forwards: [] });
   });
 
   it("does not route a DM from a non-allowed user", async () => {

@@ -64,7 +64,7 @@ export type Classification =
       midThread?: boolean;
       triggerTs?: string;
     }
-  | { kind: "sub-continue"; channelId: string; threadTs: string; userId: string; text: string };
+  | { kind: "sub-continue"; channelId: string; threadTs: string; userId: string; text: string; ts?: string };
 
 /** True when `text` mentions the given bot user (`<@U..>` or `<@U..|name>`). */
 export function mentionsBot(text: string, botUserId: string): boolean {
@@ -160,7 +160,7 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
       if (!fromBot && !mentionsBot(msg.text ?? "", ctx.botUserId) && mentionsOthers(msg.text ?? "", ctx.botUserId)) {
         return { kind: "ignore" };
       }
-      return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text };
+      return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text, ts: msg.ts };
     }
     // An unowned (human) thread: only join it on an explicit @mention. This is
     // independent of sub.trigger — even in "all" mode we must not hijack a

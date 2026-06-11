@@ -97,7 +97,7 @@ describe("classifySubscription", () => {
       ctx({ hasThreadSession: known }),
     );
     expect(known).toHaveBeenCalledWith("C_SUB", "169.1");
-    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "and the PR too" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "and the PR too", ts: "169.2" });
   });
 
   it("ignores a reply in an unknown thread (no hijacking human threads)", () => {
@@ -137,7 +137,7 @@ describe("classifySubscription", () => {
       { channel: "D123", user: "U1", text: "more", ts: "1.2", thread_ts: "1.1" },
       ctx({ subscribedChannels: [], respondToDms: true, hasThreadSession: () => true }),
     );
-    expect(r).toEqual({ kind: "sub-continue", channelId: "D123", threadTs: "1.1", userId: "U1", text: "more" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "D123", threadTs: "1.1", userId: "U1", text: "more", ts: "1.2" });
   });
 
   it("starts a mid-thread session when mentioned in an unknown thread (root threadTs, midThread flag)", () => {
@@ -182,7 +182,7 @@ describe("classifySubscription", () => {
       { channel: "C_SUB", user: "U1", text: "<@BOT1> more", ts: "169.5", thread_ts: "169.1" },
       ctx({ hasThreadSession: () => true }),
     );
-    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "more" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "more", ts: "169.5" });
   });
 
   it("respects allowedUserIds for a mid-thread mention", () => {
