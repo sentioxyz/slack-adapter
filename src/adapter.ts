@@ -160,6 +160,30 @@ export function renderMessageAttachments(
   return blocks.join("\n");
 }
 
+/** Shared line renderer for thread-context blocks: "<@author>: body" per message. */
+function renderContextLines(
+  messages: ThreadContextMessage[],
+  skip: (m: ThreadContextMessage) => boolean,
+): string[] {
+  const lines: string[] = [];
+  for (const m of messages) {
+    if (skip(m)) continue;
+    const text = (m.text ?? "").trim();
+    // Bot/integration posts (GitHub, CI, alerting bots) carry an empty top-level
+    // text and put everything in `attachments[]`; include that so an @mention in
+    // such a thread actually sees what was posted. Restricted to bot messages:
+    // human shares/forwards also live in `attachments[]` but are surfaced
+    // separately via extractForwards/forwardedTexts, so rendering them here too
+    // would duplicate them.
+    const attachmentText = m.bot_id ? renderMessageAttachments(m.attachments) : "";
+    const body = [text, attachmentText].filter(Boolean).join("\n");
+    if (!body) continue;
+    const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
+    lines.push(`${author}: ${body}`);
+  }
+  return lines;
+}
+
 /**
  * Render a list of Slack thread messages as a prependable context block.
  *
@@ -174,27 +198,43 @@ export function renderMessageAttachments(
  * a live Slack client.
  */
 export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?: string): string {
-  const lines: string[] = [];
-  for (const m of messages) {
-    // Skip the triggering message — it's already dispatched as the user text.
-    if (triggerTs && m.ts === triggerTs) continue;
-    const text = (m.text ?? "").trim();
-    // Bot/integration posts (GitHub, CI, alerting bots) carry an empty top-level
-    // text and put everything in `attachments[]`; include that so an @mention in
-    // such a thread actually sees what was posted. Restricted to bot messages:
-    // human shares/forwards also live in `attachments[]` but are surfaced
-    // separately via extractForwards/forwardedTexts, so rendering them here too
-    // would duplicate them.
-    const attachmentText = m.bot_id ? renderMessageAttachments(m.attachments) : "";
-    const body = [text, attachmentText].filter(Boolean).join("\n");
-    if (!body) continue;
-    const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
-    lines.push(`${author}: ${body}`);
-  }
+  // Skip the triggering message — it's already dispatched as the user text.
+  const lines = renderContextLines(messages, (m) => Boolean(triggerTs && m.ts === triggerTs));
   if (lines.length === 0) return "";
-
   return [
     "[Thread context — full history of the Slack thread this conversation was started from]",
+    ...lines,
+    "[End thread context]",
+  ].join("\n");
+}
+
+/**
+ * Render the messages a thread accumulated since the agent's last delivered
+ * message (`lastDeliveredTs`) as a prependable context block — the "gap" left by
+ * replies that were skipped (e.g. addressed to someone else) or arrived while
+ * the process was down. Excludes the triggering message (dispatched separately
+ * as the user text) and the bot's own replies (the agent already has them in
+ * context). ts comparison is numeric: Slack ts strings must never be compared
+ * lexicographically. Returns "" when the gap is empty.
+ */
+export function renderGapContext(
+  messages: ThreadContextMessage[],
+  lastDeliveredTs: string,
+  botUserId: string,
+  triggerTs?: string,
+): string {
+  const watermark = Number.parseFloat(lastDeliveredTs);
+  const lines = renderContextLines(
+    messages,
+    (m) =>
+      !m.ts ||
+      !(Number.parseFloat(m.ts) > watermark) ||
+      m.ts === triggerTs ||
+      m.user === botUserId,
+  );
+  if (lines.length === 0) return "";
+  return [
+    "[Thread context — messages in this thread since your last turn that were not individually delivered]",
     ...lines,
     "[End thread context]",
   ].join("\n");
