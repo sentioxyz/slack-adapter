@@ -1,7 +1,7 @@
 // src/formatter.ts
 import type { types } from "@slack/bolt";
 import type { OutgoingMessage, PermissionRequest } from "@openacp/plugin-sdk";
-import { splitSafe } from "./utils.js";
+import { splitSafe, MARKDOWN_SAFE_LIMIT } from "./utils.js";
 
 type KnownBlock = types.KnownBlock;
 
@@ -65,6 +65,13 @@ export class SlackFormatter implements ISlackFormatter {
       case "text": {
         const text = message.text ?? "";
         if (!text.trim()) return [];
+        if (text.length <= MARKDOWN_SAFE_LIMIT) {
+          // Raw markdown — Slack parses and renders it server-side.
+          return [{ type: "markdown", text }];
+        }
+        // The 12k markdown-block limit is cumulative per payload and this
+        // method's contract is "blocks for one message" — oversize one-shot
+        // text degrades to legacy mrkdwn sections instead of failing.
         const converted = markdownToMrkdwn(text);
         return splitSafe(converted).map(chunk => section(chunk));
       }
