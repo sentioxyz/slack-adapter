@@ -749,9 +749,11 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files, forwards, ts) => {
+      async (sessionChannelSlug, text, userId, files, forwards, ts) => {
         const meta = [...this.sessions.values()].find((m) => m.channelSlug === sessionChannelSlug);
-        return this.dispatchToSession(sessionChannelSlug, text, userId, files, {
+        // Legacy session-channel path has no watermark, so the dispatched/command
+        // boolean is irrelevant here — discard it to satisfy the Promise<void> callback.
+        await this.dispatchToSession(sessionChannelSlug, text, userId, files, {
           channelId: meta?.channelId,
           threadTs: meta?.threadTs,
           triggerTs: ts,
@@ -843,7 +845,7 @@ export class SlackAdapter extends MessagingAdapter {
             }
           }
 
-          await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files, {
+          const dispatched = await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files, {
             channelId,
             threadTs,
             triggerTs: opts?.triggerTs,
@@ -854,8 +856,11 @@ export class SlackAdapter extends MessagingAdapter {
           // Advance the gap-backfill watermark: everything up to and including
           // this trigger has now been delivered (skipped messages in between
           // were just backfilled by dispatchToSession). Persisted so backfill
-          // keeps working across restarts.
-          if (opts?.triggerTs) {
+          // keeps working across restarts. Skipped when the message was
+          // intercepted as a /command — it never reached the agent, so advancing
+          // the watermark would push any preceding skipped (gated) reply below it
+          // and silently drop it from the next gap backfill.
+          if (dispatched && opts?.triggerTs) {
             meta.lastDeliveredTs = opts.triggerTs;
             try {
               const existingRecord = this.core.sessionManager.getSessionRecord(sessionId);
@@ -1489,6 +1494,11 @@ export class SlackAdapter extends MessagingAdapter {
    * context header, and attachment collection (trigger files, thread-history
    * files, and forwarded messages) via the file proxy / inline payload builder.
    * Shared by the legacy event-router path and the channel-subscription path.
+   *
+   * Returns `true` when the message was dispatched toward the agent (reached
+   * `core.handleMessage`), `false` when it was intercepted as a `/command`. The
+   * subscription path gates the gap-watermark advance on this so a command never
+   * pushes a preceding skipped reply below the watermark.
    */
   private async dispatchToSession(
     sessionChannelSlug: string,
@@ -1496,10 +1506,12 @@ export class SlackAdapter extends MessagingAdapter {
     userId: string,
     files?: SlackFileInfo[],
     extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[]; lastDeliveredTs?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (text.startsWith("/")) {
       const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
-      if (handled) return;
+      // Intercepted as a command — it never reached the agent. Report this so the
+      // subscription path does NOT advance the gap watermark past it.
+      if (handled) return false;
     }
 
     // Processing indicator: mark the triggering message as seen. Fire-and-forget —
@@ -1585,6 +1597,8 @@ export class SlackAdapter extends MessagingAdapter {
     await this.core
       .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text: dispatchText, attachments })
       .catch((err) => this.log.error({ err }, "handleMessage error"));
+    // Dispatched toward the agent — the subscription path may advance the watermark.
+    return true;
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
