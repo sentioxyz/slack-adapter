@@ -151,8 +151,15 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 
   // Thread reply.
   if (msg.thread_ts) {
-    // A thread the bot already owns → continue the existing session.
+    // A thread the bot already owns → continue the existing session, UNLESS the
+    // reply @mentions someone else without mentioning this bot — then it is
+    // almost certainly addressed to that someone, not the bot. Skipped content
+    // is recovered later by gap backfill. Bot-authored messages already passed
+    // the stricter whitelist+mention gate at the top and are not re-gated.
     if (ctx.hasThreadSession(channelId, msg.thread_ts)) {
+      if (!fromBot && !mentionsBot(msg.text ?? "", ctx.botUserId) && mentionsOthers(msg.text ?? "", ctx.botUserId)) {
+        return { kind: "ignore" };
+      }
       return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text };
     }
     // An unowned (human) thread: only join it on an explicit @mention. This is

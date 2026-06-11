@@ -230,6 +230,46 @@ describe("classifySubscription", () => {
     expect(r.kind).toBe("sub-start");
     expect((r as { midThread?: boolean }).midThread).toBeUndefined();
   });
+
+  it("skips an owned-thread human reply that mentions someone else without mentioning the bot", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@U2> can you check this?", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("processes an owned-thread reply that mentions the bot AND someone else", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@BOT1> and <@U2> look at this", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("sub-continue");
+  });
+
+  it("skips an owned-thread reply that only carries a broadcast mention", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<!here> anyone around?", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("does not re-gate a whitelisted bot in an owned thread (its own gate already passed)", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "<@BOT1> build finished", ts: "169.2", thread_ts: "169.1", bot_id: "B_OK", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"], hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("sub-continue");
+  });
+
+  it("does not gate a TOP-LEVEL message that mentions someone else in 'all' mode", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@U2> fyi", ts: "169.9" },
+      ctx({ subscribedChannels: [{ channelId: "C_SUB", trigger: "all" }] }),
+    );
+    expect(r.kind).toBe("sub-start");
+  });
 });
 
 describe("mentionsOthers", () => {
