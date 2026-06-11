@@ -49,6 +49,7 @@ const SECTION_LIMIT = 3000;
  * the boundary will be split mid-block.
  * Used by SlackFormatter and SlackTextBuffer to avoid exceeding Slack's
  * 3000-char section limit.
+ * See also: splitAtBoundaries — the fence-aware counterpart used by splitMarkdownSafe.
  */
 export function splitSafe(text: string, limit = SECTION_LIMIT): string[] {
   if (text.length <= limit) return [text];
@@ -100,7 +101,11 @@ function parseMarkdownSegments(text: string): MarkdownSegment[] {
   return segs;
 }
 
-/** Split plain text preferring paragraph boundaries, then lines, then hard cut. */
+/**
+ * Split plain text preferring paragraph boundaries, then lines, then hard cut.
+ * Fence-aware counterpart of splitSafe: called by splitMarkdownSafe so it can
+ * pass fence body slices without losing track of opening/closing backticks.
+ */
 function splitAtBoundaries(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const out: string[] = [];
@@ -109,6 +114,8 @@ function splitAtBoundaries(text: string, limit: number): string[] {
     let cut = rest.lastIndexOf("\n\n", limit);
     if (cut <= 0) cut = rest.lastIndexOf("\n", limit);
     if (cut <= 0) cut = limit;
+    // Guarantee forward progress even when limit is ≤ 0 (degenerate fence overhead case).
+    if (cut <= 0) cut = Math.max(1, limit);
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\n+/, "");
   }
@@ -137,7 +144,9 @@ export function splitMarkdownSafe(text: string, limit = MARKDOWN_SAFE_LIMIT): st
         pieces.push(wrap(seg.body));
       } else {
         const overhead = seg.opener.length + 5; // opener + \n … \n```
-        pieces.push(...splitAtBoundaries(seg.body, limit - overhead).map(wrap));
+        // Clamp to at least 1 so splitAtBoundaries always makes forward progress
+        // even when the opener itself is longer than the limit (degenerate case).
+        pieces.push(...splitAtBoundaries(seg.body, Math.max(1, limit - overhead)).map(wrap));
       }
     }
   }

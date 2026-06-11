@@ -72,4 +72,36 @@ describe("splitMarkdownSafe", () => {
       expect(c.length).toBeLessThanOrEqual(MARKDOWN_SAFE_LIMIT);
     }
   });
+
+  it("terminates and preserves content when fence opener exceeds limit (degenerate case)", () => {
+    // Fence opener is 60 chars, limit is 50 → overhead > limit; must not hang or throw.
+    const longLang = "x".repeat(56); // "```" + 56 = 59-char opener line
+    const body = "line1\nline2\nline3";
+    const text = `\`\`\`${longLang}\n${body}\n\`\`\``;
+    // Should terminate without error; all body characters preserved across chunks
+    // (degenerate: chars may be split across many chunks, don't assert chunk size ≤ limit).
+    const chunks = splitMarkdownSafe(text, 50);
+    expect(chunks.length).toBeGreaterThan(0);
+    const joined = chunks.join("\n");
+    // Verify each body character is a subsequence of the joined output (content not lost).
+    let pos = 0;
+    for (const ch of body) {
+      const idx = joined.indexOf(ch, pos);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      if (idx >= 0) pos = idx + 1;
+    }
+  });
+
+  it("closes an unterminated fence (streaming case) in every chunk", () => {
+    // Fence opened but never closed — the streaming partial-message path.
+    const codeLines = Array.from({ length: 60 }, (_, i) => `const v${i} = ${i};`).join("\n");
+    const text = `intro\n\n\`\`\`js\n${codeLines}`;
+    const chunks = splitMarkdownSafe(text, 500);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      // Every chunk must have balanced fences (even count of ``` lines).
+      const fences = c.split("\n").filter(l => /^\s{0,3}```/.test(l.trimEnd())).length;
+      expect(fences % 2).toBe(0);
+    }
+  });
 });
