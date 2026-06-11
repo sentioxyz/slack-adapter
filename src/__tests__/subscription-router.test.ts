@@ -356,4 +356,16 @@ describe("resolveThreadSession", () => {
       platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1" },
     });
   });
+
+  it("restores lastDeliveredTs from a persisted record so gap backfill survives restarts", async () => {
+    const d = deps();
+    d.getSessionByThread = vi.fn().mockReturnValue(undefined);
+    d.getRecordByThread = vi.fn().mockReturnValue({
+      sessionId: "sess-old",
+      platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1", lastDeliveredTs: "169.7" },
+    });
+    const { sessionId, meta } = await resolveThreadSession(d, "C_SUB", "169.1");
+    expect(sessionId).toBe("sess-old");
+    expect(meta.lastDeliveredTs).toBe("169.7");
+  });
 });

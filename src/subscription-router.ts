@@ -183,7 +183,10 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 export interface ThreadSessionDeps {
   sessions: Map<string, SlackSessionMeta>;
   getSessionByThread: (platform: string, threadId: string) => { id: string } | undefined;
-  getRecordByThread: (platform: string, threadId: string) => { sessionId: string } | undefined;
+  getRecordByThread: (
+    platform: string,
+    threadId: string,
+  ) => { sessionId: string; platform?: Record<string, unknown> } | undefined;
   handleNewSession: (
     platform: string,
     agentName?: string,
@@ -225,7 +228,8 @@ export async function resolveThreadSession(
   // session — that would orphan the stored one and lose its agent context.
   const record = deps.getRecordByThread("slack", key);
   if (record) {
-    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
+    const lastDeliveredTs = (record.platform as { lastDeliveredTs?: string } | undefined)?.lastDeliveredTs;
+    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs, lastDeliveredTs };
     deps.sessions.set(record.sessionId, meta);
     return { sessionId: record.sessionId, meta };
   }
