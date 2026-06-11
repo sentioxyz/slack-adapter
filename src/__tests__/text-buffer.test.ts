@@ -168,6 +168,20 @@ describe("SlackTextBuffer", () => {
     expect(retry.blocks[0].text.text).toBe("*bold*");
   });
 
+  it("stripTtsBlock preserves markdown newline structure", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "9.9" });
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", { enqueue } as any);
+    buf.append("# Title\n\n- item 1\n- item 2\n\n[TTS]spoken summary[/TTS]");
+    await buf.flush();
+    await buf.stripTtsBlock();
+
+    const updateCall = enqueue.mock.calls.find((c: any) => c[0] === "chat.update");
+    expect(updateCall).toBeDefined();
+    // newlines must survive — markdown blocks need them for structure
+    expect(updateCall![1].text).toBe("# Title\n\n- item 1\n- item 2");
+    expect(updateCall![1].blocks).toEqual([{ type: "markdown", text: "# Title\n\n- item 1\n- item 2" }]);
+  });
+
   it("stripTtsBlock edits the posted message with a markdown block", async () => {
     const enqueue = vi.fn().mockResolvedValue({ ts: "9.9" });
     const buf = new SlackTextBuffer("C123", undefined, "sess1", { enqueue } as any);

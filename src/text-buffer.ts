@@ -9,6 +9,16 @@ import { enqueueWithMarkdownFallback, markdownBlock } from "./markdown-post.js";
 
 const FLUSH_IDLE_MS = 2000; // flush after 2s of no new chunks
 
+/** Remove [TTS]...[/TTS] blocks; tidy the seam without flattening markdown
+ * structure (newlines are significant in markdown blocks). */
+function stripTts(text: string): string {
+  return text
+    .replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "")
+    .replace(/[ \t]{2,}/g, " ")   // collapse runs of spaces/tabs only
+    .replace(/\n{3,}/g, "\n\n")   // cap blank-line runs left by the removal
+    .trim();
+}
+
 export class SlackTextBuffer {
   private buffer = "";
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -61,7 +71,10 @@ export class SlackTextBuffer {
             text: chunk,
             blocks: [markdownBlock(chunk)],
           }, this.log);
-          // Track last posted message for potential TTS block editing
+          // Track last posted message for potential TTS block editing.
+          // Note: only the final chunk of a multi-chunk flush is editable here;
+          // a TTS marker buried in an earlier chunk of a >11.5k response won't
+          // be stripped (acceptable: TTS blocks are short and come at the end).
           this.lastMessageTs = (result as { ts?: string } | undefined)?.ts;
           this.lastPostedText = chunk;
         }
@@ -86,13 +99,13 @@ export class SlackTextBuffer {
   async stripTtsBlock(): Promise<void> {
     // Case 1: TTS block still in unflushed buffer
     if (/\[TTS\][\s\S]*?\[\/TTS\]/.test(this.buffer)) {
-      this.buffer = this.buffer.replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "").replace(/\s{2,}/g, " ").trim();
+      this.buffer = stripTts(this.buffer);
       return;
     }
 
     // Case 2: Already flushed — edit the posted message via chat.update
     if (this.lastMessageTs && this.lastPostedText && /\[TTS\][\s\S]*?\[\/TTS\]/.test(this.lastPostedText)) {
-      const cleaned = this.lastPostedText.replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "").replace(/\s{2,}/g, " ").trim();
+      const cleaned = stripTts(this.lastPostedText);
       if (cleaned) {
         await enqueueWithMarkdownFallback(this.queue, "chat.update", {
           channel: this.channelId,
