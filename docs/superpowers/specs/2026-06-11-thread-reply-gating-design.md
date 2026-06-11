@@ -172,9 +172,9 @@ On each subscription dispatch (`onSubscriptionMessage` in `src/adapter.ts`):
   trigger message's `channel` + `ts`, available on both dispatch paths: the
   subscription path passes `opts.triggerTs` (added in Change 2), the legacy path
   passes `msg.ts` from the event router.
-- **Remove** — `handleSessionEnd` calls `removeAll(sessionId)` (drains every
+- **Remove** — `handleSessionEnd` calls `removeAll(sessionKey)` (drains every
   outstanding reaction, since `session_end` is terminal); `handleError` calls
-  `pop(sessionId)` → `reactions.remove` for the single-pop recoverable path.
+  `remove(sessionKey)` for the single-pop recoverable path.
 - **Send queue** — `reactions.add` and `reactions.remove` are added to
   `SlackMethod` and `METHOD_RPM` in `src/send-queue.ts` (Slack Web API Tier 3 →
   50 rpm, matching the other Tier 3 entries).
