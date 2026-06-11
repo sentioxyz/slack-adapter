@@ -107,15 +107,14 @@ function parseMarkdownSegments(text: string): MarkdownSegment[] {
  * pass fence body slices without losing track of opening/closing backticks.
  */
 function splitAtBoundaries(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
+  const lim = Math.max(1, limit); // robust in isolation; callers also clamp
+  if (text.length <= lim) return [text];
   const out: string[] = [];
   let rest = text;
-  while (rest.length > limit) {
-    let cut = rest.lastIndexOf("\n\n", limit);
-    if (cut <= 0) cut = rest.lastIndexOf("\n", limit);
-    if (cut <= 0) cut = limit;
-    // Guarantee forward progress even when limit is ≤ 0 (degenerate fence overhead case).
-    if (cut <= 0) cut = Math.max(1, limit);
+  while (rest.length > lim) {
+    let cut = rest.lastIndexOf("\n\n", lim);
+    if (cut <= 0) cut = rest.lastIndexOf("\n", lim);
+    if (cut <= 0) cut = lim;
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\n+/, "");
   }
