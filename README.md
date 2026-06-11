@@ -91,6 +91,21 @@ Requires the `files:read` scope (file downloads) plus the relevant history scope
 (`channels:history`, `groups:history`, `im:history`, `mpim:history`) for reading
 thread replies.
 
+### Processing indicator
+
+While the agent works on a message, the bot adds a reaction (default 👀 `eyes`)
+to it and removes the reaction when the turn completes. Configure with
+`processingReaction` (emoji name without colons, e.g. `"hourglass"`); set it to
+`""` to disable. Requires the `reactions:write` scope — existing installs
+without it keep working, the indicator just logs a warning until the app is
+reinstalled with the updated manifest.
+
+In bot-owned threads the bot also skips replies that @mention someone else
+without mentioning the bot (including `@here`/`@channel`/user-group-only
+mentions). Skipped replies are not lost: the next processed message prepends
+them as context ("gap backfill"). Gap backfill is disabled when
+`readThreadHistory: false`, since it relies on walking the thread.
+
 ## Development
 
 ```bash

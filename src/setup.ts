@@ -46,6 +46,7 @@ export function generateSlackManifest(): SlackManifest {
             'files:read', 'files:write',
             'im:history',
             'im:write',
+            'reactions:write',
           ],
         },
       },
