@@ -137,4 +137,47 @@ describe("SlackTextBuffer", () => {
       expect.objectContaining({ channel: "C_SUB", thread_ts: "169.1" }),
     );
   });
+
+  it("posts raw markdown as a markdown block with full text fallback", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "1.1" });
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", { enqueue } as any);
+    buf.append("# Title\n\n**bold** and `**kwargs` stay raw");
+    await buf.flush();
+
+    const [method, params] = enqueue.mock.calls[0];
+    expect(method).toBe("chat.postMessage");
+    expect(params.blocks).toEqual([
+      { type: "markdown", text: "# Title\n\n**bold** and `**kwargs` stay raw" },
+    ]);
+    // Stored `text` is what other agents read back as thread context —
+    // it must be the FULL raw chunk, never a summary or converted dialect.
+    expect(params.text).toBe("# Title\n\n**bold** and `**kwargs` stay raw");
+  });
+
+  it("falls back to mrkdwn sections when markdown block is rejected", async () => {
+    const enqueue = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("invalid_blocks"), { data: { error: "invalid_blocks" } }))
+      .mockResolvedValueOnce({ ts: "2.2" });
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", { enqueue } as any);
+    buf.append("**bold**");
+    await buf.flush();
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    const retry = enqueue.mock.calls[1][1];
+    expect(retry.blocks[0].type).toBe("section");
+    expect(retry.blocks[0].text.text).toBe("*bold*");
+  });
+
+  it("stripTtsBlock edits the posted message with a markdown block", async () => {
+    const enqueue = vi.fn().mockResolvedValue({ ts: "9.9" });
+    const buf = new SlackTextBuffer("C123", undefined, "sess1", { enqueue } as any);
+    buf.append("Answer text [TTS]spoken[/TTS]");
+    await buf.flush();
+    await buf.stripTtsBlock();
+
+    const updateCall = enqueue.mock.calls.find((c: any) => c[0] === "chat.update");
+    expect(updateCall).toBeDefined();
+    expect(updateCall![1].blocks).toEqual([{ type: "markdown", text: "Answer text" }]);
+    expect(updateCall![1].text).toBe("Answer text");
+  });
 });

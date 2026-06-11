@@ -10,6 +10,11 @@ import { splitSafe } from "./utils.js";
 
 type KnownBlock = types.KnownBlock;
 
+/**
+ * Build a Slack markdown block for the given text.
+ * Caller must keep `text` within `MARKDOWN_SAFE_LIMIT` characters;
+ * use `splitMarkdownSafe` to chunk longer text before calling this.
+ */
 export function markdownBlock(text: string): KnownBlock {
   return { type: "markdown", text };
 }

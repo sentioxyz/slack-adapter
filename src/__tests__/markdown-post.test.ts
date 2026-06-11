@@ -55,7 +55,7 @@ describe("enqueueWithMarkdownFallback", () => {
   });
 
   it("splits oversize fallback text into multiple sections", async () => {
-    const long = "y".repeat(7000); // > 3000 section limit, fits one markdown block
+    const long = "y".repeat(7000); // one markdown block, but >2 mrkdwn sections after fallback
     const enqueue = vi.fn()
       .mockRejectedValueOnce(platformError("invalid_blocks"))
       .mockResolvedValueOnce({ ts: "3.3" });

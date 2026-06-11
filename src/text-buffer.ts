@@ -4,8 +4,8 @@
 
 import type { ISlackSendQueue } from "./send-queue.js";
 import type { Logger } from "./types.js";
-import { markdownToMrkdwn } from "./formatter.js";
-import { splitSafe } from "./utils.js";
+import { splitMarkdownSafe } from "./utils.js";
+import { enqueueWithMarkdownFallback, markdownBlock } from "./markdown-post.js";
 
 const FLUSH_IDLE_MS = 2000; // flush after 2s of no new chunks
 
@@ -50,16 +50,17 @@ export class SlackTextBuffer {
 
     this.flushPromise = (async () => {
       try {
-        const converted = markdownToMrkdwn(text);
-        const chunks = splitSafe(converted);
+        const chunks = splitMarkdownSafe(text);
         for (const chunk of chunks) {
           if (!chunk.trim()) continue;
-          const result = await this.queue.enqueue("chat.postMessage", {
+          const result = await enqueueWithMarkdownFallback(this.queue, "chat.postMessage", {
             channel: this.channelId,
             ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+            // `text` doubles as the notification fallback AND the thread-context
+            // source other agents read back — always the full raw chunk.
             text: chunk,
-            blocks: [{ type: "section", text: { type: "mrkdwn", text: chunk } }],
-          });
+            blocks: [markdownBlock(chunk)],
+          }, this.log);
           // Track last posted message for potential TTS block editing
           this.lastMessageTs = (result as { ts?: string } | undefined)?.ts;
           this.lastPostedText = chunk;
@@ -93,12 +94,12 @@ export class SlackTextBuffer {
     if (this.lastMessageTs && this.lastPostedText && /\[TTS\][\s\S]*?\[\/TTS\]/.test(this.lastPostedText)) {
       const cleaned = this.lastPostedText.replace(/\[TTS\][\s\S]*?\[\/TTS\]/g, "").replace(/\s{2,}/g, " ").trim();
       if (cleaned) {
-        await this.queue.enqueue("chat.update", {
+        await enqueueWithMarkdownFallback(this.queue, "chat.update", {
           channel: this.channelId,
           ts: this.lastMessageTs,
           text: cleaned,
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: cleaned } }],
-        });
+          blocks: [markdownBlock(cleaned)],
+        }, this.log);
       }
       this.lastPostedText = cleaned;
     }
