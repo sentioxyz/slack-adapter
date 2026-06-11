@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fetchThreadContext, renderThreadContext, renderGapContext, type ThreadContextMessage } from "../adapter.js";
+import { fetchThreadContext, renderThreadContext, renderGapContext, buildWatermarkPlatformPatch, type ThreadContextMessage } from "../adapter.js";
 
 const silentLog = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -279,5 +279,21 @@ describe("renderGapContext", () => {
   it("keeps other bots' messages (only this bot's own are excluded)", () => {
     const out = renderGapContext([{ ts: "2", bot_id: "B_CI", text: "build failed" }], "1", "BOTU");
     expect(out).toContain("<@B_CI>: build failed");
+  });
+});
+
+describe("buildWatermarkPlatformPatch", () => {
+  it("preserves unrelated platform keys (e.g. skillMsgTs) while advancing the watermark", () => {
+    const patch = buildWatermarkPlatformPatch(
+      { channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", skillMsgTs: "555.1" },
+      "C1", "C1:1.1", "1.1", "1.9",
+    );
+    expect(patch.platform).toEqual({ channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", skillMsgTs: "555.1", lastDeliveredTs: "1.9" });
+  });
+
+  it("works when no platform exists yet", () => {
+    expect(buildWatermarkPlatformPatch(undefined, "C1", "C1:1.1", "1.1", "1.9").platform).toEqual({
+      channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", lastDeliveredTs: "1.9",
+    });
   });
 });

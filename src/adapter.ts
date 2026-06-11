@@ -496,6 +496,22 @@ interface CoreKernel {
   };
 }
 
+/**
+ * Merge a watermark advance into a session record's platform field without
+ * clobbering unrelated platform keys (patchRecord replaces platform wholesale).
+ */
+export function buildWatermarkPlatformPatch(
+  existingPlatform: Record<string, unknown> | undefined,
+  channelId: string,
+  channelSlug: string,
+  threadTs: string,
+  lastDeliveredTs: string,
+): { platform: Record<string, unknown> } {
+  return {
+    platform: { ...(existingPlatform ?? {}), channelId, topicId: channelSlug, threadTs, lastDeliveredTs },
+  };
+}
+
 export class SlackAdapter extends MessagingAdapter {
   readonly name = 'slack';
   readonly renderer!: IRenderer;
@@ -842,9 +858,17 @@ export class SlackAdapter extends MessagingAdapter {
           if (opts?.triggerTs) {
             meta.lastDeliveredTs = opts.triggerTs;
             try {
-              await this.core.sessionManager.patchRecord(sessionId, {
-                platform: { channelId, topicId: meta.channelSlug, threadTs, lastDeliveredTs: opts.triggerTs },
-              });
+              const existingRecord = this.core.sessionManager.getSessionRecord(sessionId);
+              await this.core.sessionManager.patchRecord(
+                sessionId,
+                buildWatermarkPlatformPatch(
+                  existingRecord?.platform as Record<string, unknown> | undefined,
+                  channelId,
+                  meta.channelSlug,
+                  threadTs,
+                  opts.triggerTs,
+                ),
+              );
             } catch (patchErr) {
               this.log.warn({ err: patchErr, sessionId }, "Failed to persist lastDeliveredTs");
             }
@@ -1494,7 +1518,7 @@ export class SlackAdapter extends MessagingAdapter {
       if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
         try {
           threadMessages = await fetchThreadMessages(
-            (method: any, params: any) => this.queue.enqueue(method, params),
+            (method, params) => this.queue.enqueue(method, params),
             this.log, extras.channelId, extras.threadTs,
           );
         } catch (err) {

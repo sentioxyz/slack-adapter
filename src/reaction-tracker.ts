@@ -6,6 +6,13 @@
 // Every add() must be balanced by exactly one remove() at turn end; clear() is
 // the teardown escape hatch for sessions ending abnormally.
 // In-memory only: a crash mid-turn leaves the reaction behind (accepted).
+//
+// FIFO assumption verified: core emits session_end once per session (it
+// terminates the session's state machine — session.finish() transitions to the
+// terminal "finished" state). A single remove() at handleSessionEnd therefore
+// drains exactly the one outstanding reaction for the final prompt. No N-1 leak
+// is possible because the session ends after the prompt that produced session_end;
+// any queued prompts behind it are never executed.
 import type { Logger } from "./types.js";
 
 export type ReactionEnqueue = (
