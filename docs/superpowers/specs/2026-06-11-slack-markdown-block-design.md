@@ -1,7 +1,7 @@
 # Slack Markdown Block Rendering — Design
 
 **Date:** 2026-06-11
-**Status:** Approved design, pending implementation plan
+**Status:** Implemented (see docs/superpowers/plans/2026-06-11-slack-markdown-block.md)
 
 ## Problem
 
