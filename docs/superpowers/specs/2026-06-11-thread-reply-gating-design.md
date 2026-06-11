@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-11
 **Branch:** `feat/thread-reply-gating`
-**Status:** Planned
+**Status:** Implemented
 **Depends on:** `2026-06-03-channel-subscription-design.md` (thread-session model)
 
 ## Overview
@@ -149,23 +149,32 @@ On each subscription dispatch (`onSubscriptionMessage` in `src/adapter.ts`):
 - When the agent turn completes (`session_end`) or errors (`error`), the adapter
   removes the oldest outstanding reaction via `reactions.remove`.
 - If message B arrives while A's turn is running, B is dispatched immediately
-  (core queues it) and also gets the reaction — both messages show "seen". Turn
-  ends are matched FIFO: A's `session_end` removes A's reaction, then B's removes
-  B's. This matches core's FIFO prompt queue ordering.
+  (core queues it) and also gets the reaction — both messages show "seen".
+  A `session_end` event is **terminal** for the live session (SessionBridge calls
+  `session.finish()`; the `finished` state has no outgoing transitions; subsequent
+  thread replies resume the record into a fresh live session via lazy resume). As a
+  result, at most one `session_end` arrives per live session, and `handleSessionEnd`
+  drains **all** outstanding reactions via `removeAll`. The recoverable `error` path
+  (error→active is a valid transition) pops exactly one reaction.
 
 ### Implementation
 
 - **Bookkeeping** — a per-session FIFO, `sessionId → Array<{channel, ts}>`,
-  in-memory only. Implemented as a small pure module (e.g.
-  `src/reaction-tracker.ts`: `push(sessionId, ref)` / `pop(sessionId)`) so the
-  pairing logic is unit-testable; the adapter owns the Slack calls.
+  in-memory only. Implemented as `src/reaction-tracker.ts` (`ReactionTracker`),
+  which owns the Slack `reactions.add` / `reactions.remove` calls via an injected
+  enqueue function. The tracker owns the calls (rather than the adapter) because
+  `remove()` must await its own paired `add()`'s API-call settlement — `reactions.add`
+  and `reactions.remove` run on separate rate-limit queues, so a naïve design could
+  issue a remove before its corresponding add had landed. A `clear(sessionKey)` method
+  exists as a teardown hook to release all pending refs when a session is torn down.
 - **Add** — in `dispatchToSession`, after `/command` interception (commands never
   reach the agent → no reaction) and before `core.handleMessage`. Requires the
   trigger message's `channel` + `ts`, available on both dispatch paths: the
   subscription path passes `opts.triggerTs` (added in Change 2), the legacy path
   passes `msg.ts` from the event router.
-- **Remove** — at the top of `handleSessionEnd` and `handleError`:
-  `pop(sessionId)` → `reactions.remove`.
+- **Remove** — `handleSessionEnd` calls `removeAll(sessionId)` (drains every
+  outstanding reaction, since `session_end` is terminal); `handleError` calls
+  `pop(sessionId)` → `reactions.remove` for the single-pop recoverable path.
 - **Send queue** — `reactions.add` and `reactions.remove` are added to
   `SlackMethod` and `METHOD_RPM` in `src/send-queue.ts` (Slack Web API Tier 3 →
   50 rpm, matching the other Tier 3 entries).
@@ -226,3 +235,7 @@ Adapter reaction tests:
 - **Misdirected-reply heuristic** — a human reply like "@alice please review"
   that *also* expects the bot to act is skipped; the author must @mention the bot
   to pull it in. This is the intended trade-off.
+- **Watermark float precision** — gap selection compares Slack ts values via
+  `parseFloat`; two ts that differ only in the last microsecond digits can
+  collide in IEEE-754 and drop a single boundary message from backfill.
+  Real thread replies are seconds apart, so this is accepted.
