@@ -34,7 +34,7 @@ export type SessionLookup = (channelId: string) => SlackSessionMeta | undefined;
 // Callback to dispatch an incoming message to core
 export type IncomingMessageCallback = (
   sessionId: string, text: string, userId: string,
-  files?: SlackFileInfo[], forwards?: ForwardedMessage[],
+  files?: SlackFileInfo[], forwards?: ForwardedMessage[], ts?: string,
 ) => void | Promise<void>;
 
 // Callback to create a new session when user messages the notification channel
@@ -121,13 +121,14 @@ export class SlackEventRouter implements ISlackEventRouter {
         },
       );
       if (cls.kind !== "ignore") {
-        // Forward the mid-thread markers (only present on a sub-start that began
-        // from an @mention inside an unowned thread) so the adapter can prepend
-        // the thread's full history before dispatching.
+        // triggerTs is the triggering message's own ts for EVERY variant: the
+        // adapter reacts to it ("processing" indicator) and advances the
+        // gap-backfill watermark to it. Top-level starts trigger on the thread
+        // root itself, so threadTs doubles as the trigger ts there.
         const opts =
           cls.kind === "sub-start"
-            ? { midThread: cls.midThread, triggerTs: cls.triggerTs, forwards }
-            : { forwards };
+            ? { midThread: cls.midThread, triggerTs: cls.triggerTs ?? cls.threadTs, forwards }
+            : { triggerTs: cls.ts, forwards };
         await this.onSubscriptionMessage?.(cls.channelId, cls.threadTs, cls.userId, cls.text, files, opts);
         return;
       }
@@ -156,7 +157,7 @@ export class SlackEventRouter implements ISlackEventRouter {
       const session = this.sessionLookup(channelId);
       if (session) {
         this.log.debug({ channelId, sessionSlug: session.channelSlug }, "Routing to session");
-        this.onIncoming(session.channelSlug, text, userId, files, forwards);
+        this.onIncoming(session.channelSlug, text, userId, files, forwards, msg.ts);
         return;
       }
 

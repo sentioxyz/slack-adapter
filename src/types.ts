@@ -68,6 +68,13 @@ export const SlackChannelConfigSchema = z.object({
    * the triggering one. Set false to limit API calls to the triggering message.
    */
   readThreadHistory: z.boolean().default(true),
+  /**
+   * Emoji name (no colons) added as a reaction to a message while the agent is
+   * processing it, and removed when the turn completes — e.g. "eyes" or
+   * "hourglass". Set to "" to disable the indicator. Requires the
+   * `reactions:write` OAuth scope.
+   */
+  processingReaction: z.string().default("eyes"),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
@@ -78,6 +85,13 @@ export interface SlackSessionMeta {
   channelSlug: string;   // e.g. "openacp-fix-auth-bug-a3k9", or "C123:169..." for subscription threads
   /** Slack thread root (parent message ts) when this session is bound to a subscribed channel thread. */
   threadTs?: string;
+  /**
+   * ts of the last thread message delivered to the agent (subscription threads).
+   * Watermark for gap backfill: messages after it that were never individually
+   * dispatched (skipped replies, downtime) are prepended as context on the next
+   * dispatch. Persisted with the rest of the platform fields.
+   */
+  lastDeliveredTs?: string;
 }
 
 /** Minimal file metadata extracted from Slack message events (subtype: file_share) */

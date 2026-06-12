@@ -64,11 +64,25 @@ export type Classification =
       midThread?: boolean;
       triggerTs?: string;
     }
-  | { kind: "sub-continue"; channelId: string; threadTs: string; userId: string; text: string };
+  | { kind: "sub-continue"; channelId: string; threadTs: string; userId: string; text: string; ts?: string };
 
 /** True when `text` mentions the given bot user (`<@U..>` or `<@U..|name>`). */
 export function mentionsBot(text: string, botUserId: string): boolean {
   return new RegExp(`<@${botUserId}(\\|[^>]+)?>`).test(text);
+}
+
+/**
+ * True when `text` mentions someone OTHER than the given bot: another user/bot
+ * (`<@U…>`, `<@W…>`, with or without `|label`), a broadcast (`<!here>`,
+ * `<!channel>`, `<!everyone>`), or a user group (`<!subteam^…>`). Used to gate
+ * owned-thread replies: such a reply is probably addressed to that someone,
+ * not to this bot.
+ */
+export function mentionsOthers(text: string, botUserId: string): boolean {
+  for (const m of text.matchAll(/<@([A-Z0-9]+)(?:\|[^>]+)?>/g)) {
+    if (m[1] !== botUserId) return true;
+  }
+  return /<!(?:here|channel|everyone)(?:\|[^>]+)?>|<!subteam\^[^>]+>/.test(text);
 }
 
 /** Remove the bot's own mention token(s) and collapse the resulting whitespace. */
@@ -137,9 +151,16 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 
   // Thread reply.
   if (msg.thread_ts) {
-    // A thread the bot already owns → continue the existing session.
+    // A thread the bot already owns → continue the existing session, UNLESS the
+    // reply @mentions someone else without mentioning this bot — then it is
+    // almost certainly addressed to that someone, not the bot. Skipped content
+    // is recovered later by gap backfill. Bot-authored messages already passed
+    // the stricter whitelist+mention gate at the top and are not re-gated.
     if (ctx.hasThreadSession(channelId, msg.thread_ts)) {
-      return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text };
+      if (!fromBot && !mentionsBot(msg.text ?? "", ctx.botUserId) && mentionsOthers(msg.text ?? "", ctx.botUserId)) {
+        return { kind: "ignore" };
+      }
+      return { kind: "sub-continue", channelId, threadTs: msg.thread_ts, userId, text, ts: msg.ts };
     }
     // An unowned (human) thread: only join it on an explicit @mention. This is
     // independent of sub.trigger — even in "all" mode we must not hijack a
@@ -162,7 +183,10 @@ export function classifySubscription(msg: SubscriptionMessage, ctx: Subscription
 export interface ThreadSessionDeps {
   sessions: Map<string, SlackSessionMeta>;
   getSessionByThread: (platform: string, threadId: string) => { id: string } | undefined;
-  getRecordByThread: (platform: string, threadId: string) => { sessionId: string } | undefined;
+  getRecordByThread: (
+    platform: string,
+    threadId: string,
+  ) => { sessionId: string; platform?: Record<string, unknown> } | undefined;
   handleNewSession: (
     platform: string,
     agentName?: string,
@@ -204,7 +228,8 @@ export async function resolveThreadSession(
   // session — that would orphan the stored one and lose its agent context.
   const record = deps.getRecordByThread("slack", key);
   if (record) {
-    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs };
+    const lastDeliveredTs = (record.platform as { lastDeliveredTs?: string } | undefined)?.lastDeliveredTs;
+    const meta: SlackSessionMeta = { channelId, channelSlug: key, threadTs, lastDeliveredTs };
     deps.sessions.set(record.sessionId, meta);
     return { sessionId: record.sessionId, meta };
   }

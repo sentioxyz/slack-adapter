@@ -37,6 +37,7 @@ import { SlackTextBuffer } from "./text-buffer.js";
 import { SlackActivityTracker } from "./activity-tracker.js";
 import { toSlug } from "./slug.js";
 import { resolveThreadSession } from "./subscription-router.js";
+import { ReactionTracker } from "./reaction-tracker.js";
 import { SlackFileProxy } from "./file-proxy.js";
 import { collectAttachments } from "./attachment-collector.js";
 import { isSlackFileUrl } from "./utils.js";
@@ -161,6 +162,30 @@ export function renderMessageAttachments(
   return blocks.join("\n");
 }
 
+/** Shared line renderer for thread-context blocks: "<@author>: body" per message. */
+function renderContextLines(
+  messages: ThreadContextMessage[],
+  skip: (m: ThreadContextMessage) => boolean,
+): string[] {
+  const lines: string[] = [];
+  for (const m of messages) {
+    if (skip(m)) continue;
+    const text = (m.text ?? "").trim();
+    // Bot/integration posts (GitHub, CI, alerting bots) carry an empty top-level
+    // text and put everything in `attachments[]`; include that so an @mention in
+    // such a thread actually sees what was posted. Restricted to bot messages:
+    // human shares/forwards also live in `attachments[]` but are surfaced
+    // separately via extractForwards/forwardedTexts, so rendering them here too
+    // would duplicate them.
+    const attachmentText = m.bot_id ? renderMessageAttachments(m.attachments) : "";
+    const body = [text, attachmentText].filter(Boolean).join("\n");
+    if (!body) continue;
+    const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
+    lines.push(`${author}: ${body}`);
+  }
+  return lines;
+}
+
 /**
  * Render a list of Slack thread messages as a prependable context block.
  *
@@ -175,27 +200,43 @@ export function renderMessageAttachments(
  * a live Slack client.
  */
 export function renderThreadContext(messages: ThreadContextMessage[], triggerTs?: string): string {
-  const lines: string[] = [];
-  for (const m of messages) {
-    // Skip the triggering message — it's already dispatched as the user text.
-    if (triggerTs && m.ts === triggerTs) continue;
-    const text = (m.text ?? "").trim();
-    // Bot/integration posts (GitHub, CI, alerting bots) carry an empty top-level
-    // text and put everything in `attachments[]`; include that so an @mention in
-    // such a thread actually sees what was posted. Restricted to bot messages:
-    // human shares/forwards also live in `attachments[]` but are surfaced
-    // separately via extractForwards/forwardedTexts, so rendering them here too
-    // would duplicate them.
-    const attachmentText = m.bot_id ? renderMessageAttachments(m.attachments) : "";
-    const body = [text, attachmentText].filter(Boolean).join("\n");
-    if (!body) continue;
-    const author = m.user ? `<@${m.user}>` : m.bot_id ? `<@${m.bot_id}>` : "<unknown>";
-    lines.push(`${author}: ${body}`);
-  }
+  // Skip the triggering message — it's already dispatched as the user text.
+  const lines = renderContextLines(messages, (m) => Boolean(triggerTs && m.ts === triggerTs));
   if (lines.length === 0) return "";
-
   return [
     "[Thread context — full history of the Slack thread this conversation was started from]",
+    ...lines,
+    "[End thread context]",
+  ].join("\n");
+}
+
+/**
+ * Render the messages a thread accumulated since the agent's last delivered
+ * message (`lastDeliveredTs`) as a prependable context block — the "gap" left by
+ * replies that were skipped (e.g. addressed to someone else) or arrived while
+ * the process was down. Excludes the triggering message (dispatched separately
+ * as the user text) and the bot's own replies (the agent already has them in
+ * context). ts comparison is numeric: Slack ts strings must never be compared
+ * lexicographically. Returns "" when the gap is empty.
+ */
+export function renderGapContext(
+  messages: ThreadContextMessage[],
+  lastDeliveredTs: string,
+  botUserId: string,
+  triggerTs?: string,
+): string {
+  const watermark = Number.parseFloat(lastDeliveredTs);
+  const lines = renderContextLines(
+    messages,
+    (m) =>
+      !m.ts ||
+      !(Number.parseFloat(m.ts) > watermark) ||
+      m.ts === triggerTs ||
+      m.user === botUserId,
+  );
+  if (lines.length === 0) return "";
+  return [
+    "[Thread context — messages in this thread since your last turn that were not individually delivered]",
     ...lines,
     "[End thread context]",
   ].join("\n");
@@ -456,6 +497,22 @@ interface CoreKernel {
   };
 }
 
+/**
+ * Merge a watermark advance into a session record's platform field without
+ * clobbering unrelated platform keys (patchRecord replaces platform wholesale).
+ */
+export function buildWatermarkPlatformPatch(
+  existingPlatform: Record<string, unknown> | undefined,
+  channelId: string,
+  channelSlug: string,
+  threadTs: string,
+  lastDeliveredTs: string,
+): { platform: Record<string, unknown> } {
+  return {
+    platform: { ...(existingPlatform ?? {}), channelId, topicId: channelSlug, threadTs, lastDeliveredTs },
+  };
+}
+
 export class SlackAdapter extends MessagingAdapter {
   readonly name = 'slack';
   readonly renderer!: IRenderer;
@@ -469,6 +526,7 @@ export class SlackAdapter extends MessagingAdapter {
   private app!: App;
   private webClient!: WebClient;
   private queue!: SlackSendQueue;
+  private reactions!: ReactionTracker;
   private formatter: SlackFormatter;
   private channelManager!: SlackChannelManager;
   private permissionHandler!: SlackPermissionHandler;
@@ -556,6 +614,11 @@ export class SlackAdapter extends MessagingAdapter {
 
     this.webClient = new WebClient(botToken);
     this.queue = new SlackSendQueue(this.webClient);
+    this.reactions = new ReactionTracker(
+      (method, params) => this.queue.enqueue(method, params),
+      this.slackConfig.processingReaction ?? "eyes",
+      this.log,
+    );
     this.fileService = this.core.fileService;
 
     // Start the lazy file proxy (best-effort — must not block startup). It
@@ -687,11 +750,14 @@ export class SlackAdapter extends MessagingAdapter {
         }
         return undefined;
       },
-      (sessionChannelSlug, text, userId, files, forwards) => {
+      async (sessionChannelSlug, text, userId, files, forwards, ts) => {
         const meta = [...this.sessions.values()].find((m) => m.channelSlug === sessionChannelSlug);
-        return this.dispatchToSession(sessionChannelSlug, text, userId, files, {
+        // Legacy session-channel path has no watermark, so the dispatched/command
+        // boolean is irrelevant here — discard it to satisfy the Promise<void> callback.
+        await this.dispatchToSession(sessionChannelSlug, text, userId, files, {
           channelId: meta?.channelId,
           threadTs: meta?.threadTs,
+          triggerTs: ts,
           forwards,
         });
       },
@@ -752,7 +818,7 @@ export class SlackAdapter extends MessagingAdapter {
       // onSubscriptionMessage: bind the thread to a session and dispatch
       async (channelId, threadTs, userId, text, files, opts) => {
         try {
-          const { meta } = await resolveThreadSession(
+          const { sessionId, meta } = await resolveThreadSession(
             {
               sessions: this.sessions,
               getSessionByThread: (p, t) => this.core.sessionManager.getSessionByThread(p, t),
@@ -780,12 +846,39 @@ export class SlackAdapter extends MessagingAdapter {
             }
           }
 
-          await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files, {
+          const dispatched = await this.dispatchToSession(meta.channelSlug, dispatchText, userId, files, {
             channelId,
             threadTs,
             triggerTs: opts?.triggerTs,
             forwards: opts?.forwards,
+            lastDeliveredTs: meta.lastDeliveredTs,
           });
+
+          // Advance the gap-backfill watermark: everything up to and including
+          // this trigger has now been delivered (skipped messages in between
+          // were just backfilled by dispatchToSession). Persisted so backfill
+          // keeps working across restarts. Skipped when the message was
+          // intercepted as a /command — it never reached the agent, so advancing
+          // the watermark would push any preceding skipped (gated) reply below it
+          // and silently drop it from the next gap backfill.
+          if (dispatched && opts?.triggerTs) {
+            meta.lastDeliveredTs = opts.triggerTs;
+            try {
+              const existingRecord = this.core.sessionManager.getSessionRecord(sessionId);
+              await this.core.sessionManager.patchRecord(
+                sessionId,
+                buildWatermarkPlatformPatch(
+                  existingRecord?.platform as Record<string, unknown> | undefined,
+                  channelId,
+                  meta.channelSlug,
+                  threadTs,
+                  opts.triggerTs,
+                ),
+              );
+            } catch (patchErr) {
+              this.log.warn({ err: patchErr, sessionId }, "Failed to persist lastDeliveredTs");
+            }
+          }
         } catch (err) {
           this.log.error({ err, channelId, threadTs }, "Failed to handle subscription message");
         }
@@ -1120,6 +1213,7 @@ export class SlackAdapter extends MessagingAdapter {
     this._waitingNoticeTs.delete(sessionId);
     this._channelCtxInjected.delete(sessionId);
     this.surfacedFiles.delete(meta.channelSlug);
+    this.reactions.clear(meta.channelSlug);
   }
 
   /**
@@ -1401,37 +1495,59 @@ export class SlackAdapter extends MessagingAdapter {
    * context header, and attachment collection (trigger files, thread-history
    * files, and forwarded messages) via the file proxy / inline payload builder.
    * Shared by the legacy event-router path and the channel-subscription path.
+   *
+   * Returns `true` when the message was dispatched toward the agent (reached
+   * `core.handleMessage`), `false` when it was intercepted as a `/command`. The
+   * subscription path gates the gap-watermark advance on this so a command never
+   * pushes a preceding skipped reply below the watermark.
    */
   private async dispatchToSession(
     sessionChannelSlug: string,
     text: string,
     userId: string,
     files?: SlackFileInfo[],
-    extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[] },
-  ): Promise<void> {
+    extras?: { channelId?: string; threadTs?: string; triggerTs?: string; forwards?: ForwardedMessage[]; lastDeliveredTs?: string },
+  ): Promise<boolean> {
     if (text.startsWith("/")) {
       const handled = await this.tryCommandDispatch(sessionChannelSlug, text, userId);
-      if (handled) return;
+      // Intercepted as a command — it never reached the agent. Report this so the
+      // subscription path does NOT advance the gap watermark past it.
+      if (handled) return false;
+    }
+
+    // Processing indicator: mark the triggering message as seen. Fire-and-forget —
+    // a reaction failure must never block or fail the dispatch.
+    if (extras?.channelId && extras?.triggerTs) {
+      this.reactions.add(sessionChannelSlug, extras.channelId, extras.triggerTs);
     }
 
     let dispatchText = text;
     let attachments: Attachment[] | undefined;
 
     try {
+      // One thread fetch serves BOTH gap backfill and attachment collection.
+      // readThreadHistory: false means "don't walk the thread" and disables both.
+      let threadMessages: ThreadContextMessage[] | undefined;
+      if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
+        try {
+          threadMessages = await fetchThreadMessages(
+            (method, params) => this.queue.enqueue(method, params),
+            this.log, extras.channelId, extras.threadTs,
+          );
+        } catch (err) {
+          this.log.warn({ err }, "Failed to fetch thread history; dispatching without gap backfill or thread attachments");
+        }
+      }
+
+      // Gap backfill: prepend thread messages the agent never saw (skipped
+      // replies, downtime) since the lastDeliveredTs watermark.
+      if (threadMessages && extras?.lastDeliveredTs) {
+        const gap = renderGapContext(threadMessages, extras.lastDeliveredTs, this.botUserId, extras.triggerTs);
+        if (gap) dispatchText = `${gap}\n\n${dispatchText}`;
+      }
+
       const sessionId = this.core.sessionManager.getSessionByThread("slack", sessionChannelSlug)?.id;
       if (sessionId && this.fileProxy) {
-        let threadMessages: ThreadContextMessage[] | undefined;
-        if (this.slackConfig.readThreadHistory !== false && extras?.channelId && extras?.threadTs) {
-          try {
-            threadMessages = await fetchThreadMessages(
-              (method: any, params: any) => this.queue.enqueue(method, params),
-              this.log, extras.channelId, extras.threadTs,
-            );
-          } catch (err) {
-            this.log.warn({ err }, "Failed to fetch thread history for attachments; using triggering message only");
-          }
-        }
-
         const seen = this.surfacedFiles.get(sessionChannelSlug) ?? new Set<string>();
         const { attachments: collected, forwardedTexts } = collectAttachments({
           triggerFiles: files,
@@ -1454,7 +1570,7 @@ export class SlackAdapter extends MessagingAdapter {
         for (const id of payload.surfacedIds) seen.add(id);
         this.surfacedFiles.set(sessionChannelSlug, seen);
 
-        if (payload.promptAdditions) dispatchText = `${text}\n\n${payload.promptAdditions}`;
+        if (payload.promptAdditions) dispatchText = `${dispatchText}\n\n${payload.promptAdditions}`;
         if (payload.attachments.length) attachments = payload.attachments;
       }
     } catch (err) {
@@ -1482,6 +1598,8 @@ export class SlackAdapter extends MessagingAdapter {
     await this.core
       .handleMessage({ channelId: "slack", threadId: sessionChannelSlug, userId, text: dispatchText, attachments })
       .catch((err) => this.log.error({ err }, "handleMessage error"));
+    // Dispatched toward the agent — the subscription path may advance the watermark.
+    return true;
   }
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
@@ -1537,6 +1655,12 @@ export class SlackAdapter extends MessagingAdapter {
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
+
+    // Turn over (terminal session_end): clear ALL outstanding processing reactions.
+    // A live session emits at most one session_end; thread sessions resume as fresh
+    // live sessions per turn, so every reaction queued this turn must be drained now.
+    void this.reactions.removeAll(meta.channelSlug);
+
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);
@@ -1568,6 +1692,10 @@ export class SlackAdapter extends MessagingAdapter {
 
     const meta = this.getSessionMeta(sessionId);
     if (!meta) return;
+
+    // Turn complete → agent idle: clear the processing reaction (fire-and-forget).
+    void this.reactions.remove(meta.channelSlug);
+
     await this.flushTextBuffer(sessionId);
 
     const blocks = this.formatter.formatOutgoing(content);

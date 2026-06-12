@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fetchThreadContext, renderThreadContext, type ThreadContextMessage } from "../adapter.js";
+import { fetchThreadContext, renderThreadContext, renderGapContext, buildWatermarkPlatformPatch, type ThreadContextMessage } from "../adapter.js";
 
 const silentLog = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -228,5 +228,72 @@ describe("fetchThreadContext", () => {
     // callback wraps it in try/catch and dispatches the bare message on failure.
     const enqueue = vi.fn().mockRejectedValue(new Error("slack down"));
     await expect(fetchThreadContext(enqueue, silentLog, "C1", "1")).rejects.toThrow("slack down");
+  });
+});
+
+describe("renderGapContext", () => {
+  const BOT = "BOTU";
+
+  it("includes only messages strictly after lastDeliveredTs, excluding the trigger and the bot's own", () => {
+    const msgs: ThreadContextMessage[] = [
+      { ts: "100.1", user: "U1", text: "already delivered" },
+      { ts: "100.2", user: "U2", text: "skipped reply" },
+      { ts: "100.3", user: BOT, text: "bot's own answer" },
+      { ts: "100.4", user: "U3", text: "the trigger" },
+    ];
+    const out = renderGapContext(msgs, "100.1", BOT, "100.4");
+    expect(out).toContain("<@U2>: skipped reply");
+    expect(out).not.toContain("already delivered");
+    expect(out).not.toContain("bot's own answer");
+    expect(out).not.toContain("the trigger");
+  });
+
+  it("uses numeric ts comparison, not string comparison", () => {
+    // String compare would order "9.0" AFTER "10.5"; numeric compare must not.
+    const msgs: ThreadContextMessage[] = [
+      { ts: "9.0", user: "U1", text: "old message" },
+      { ts: "11.0", user: "U2", text: "new message" },
+    ];
+    const out = renderGapContext(msgs, "10.5", "BOTU");
+    expect(out).not.toContain("old message");
+    expect(out).toContain("new message");
+  });
+
+  it("wraps the gap in its own distinct header", () => {
+    const out = renderGapContext([{ ts: "2", user: "U1", text: "hi" }], "1", "BOTU");
+    expect(out).toBe(
+      [
+        "[Thread context — messages in this thread since your last turn that were not individually delivered]",
+        "<@U1>: hi",
+        "[End thread context]",
+      ].join("\n"),
+    );
+  });
+
+  it("returns empty string when nothing falls in the gap", () => {
+    expect(renderGapContext([], "1", "BOTU")).toBe("");
+    expect(renderGapContext([{ ts: "1", user: "U1", text: "delivered" }], "1", "BOTU")).toBe("");
+    expect(renderGapContext([{ ts: "2", user: "U1", text: "trigger" }], "1", "BOTU", "2")).toBe("");
+  });
+
+  it("keeps other bots' messages (only this bot's own are excluded)", () => {
+    const out = renderGapContext([{ ts: "2", bot_id: "B_CI", text: "build failed" }], "1", "BOTU");
+    expect(out).toContain("<@B_CI>: build failed");
+  });
+});
+
+describe("buildWatermarkPlatformPatch", () => {
+  it("preserves unrelated platform keys (e.g. skillMsgTs) while advancing the watermark", () => {
+    const patch = buildWatermarkPlatformPatch(
+      { channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", skillMsgTs: "555.1" },
+      "C1", "C1:1.1", "1.1", "1.9",
+    );
+    expect(patch.platform).toEqual({ channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", skillMsgTs: "555.1", lastDeliveredTs: "1.9" });
+  });
+
+  it("works when no platform exists yet", () => {
+    expect(buildWatermarkPlatformPatch(undefined, "C1", "C1:1.1", "1.1", "1.9").platform).toEqual({
+      channelId: "C1", topicId: "C1:1.1", threadTs: "1.1", lastDeliveredTs: "1.9",
+    });
   });
 });

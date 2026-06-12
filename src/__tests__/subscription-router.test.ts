@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { classifySubscription } from "../subscription-router.js";
+import { classifySubscription, mentionsOthers } from "../subscription-router.js";
 import type { SubscriptionContext } from "../subscription-router.js";
 import { resolveThreadSession } from "../subscription-router.js";
 import type { ThreadSessionDeps } from "../subscription-router.js";
@@ -97,7 +97,7 @@ describe("classifySubscription", () => {
       ctx({ hasThreadSession: known }),
     );
     expect(known).toHaveBeenCalledWith("C_SUB", "169.1");
-    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "and the PR too" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "and the PR too", ts: "169.2" });
   });
 
   it("ignores a reply in an unknown thread (no hijacking human threads)", () => {
@@ -137,7 +137,7 @@ describe("classifySubscription", () => {
       { channel: "D123", user: "U1", text: "more", ts: "1.2", thread_ts: "1.1" },
       ctx({ subscribedChannels: [], respondToDms: true, hasThreadSession: () => true }),
     );
-    expect(r).toEqual({ kind: "sub-continue", channelId: "D123", threadTs: "1.1", userId: "U1", text: "more" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "D123", threadTs: "1.1", userId: "U1", text: "more", ts: "1.2" });
   });
 
   it("starts a mid-thread session when mentioned in an unknown thread (root threadTs, midThread flag)", () => {
@@ -182,7 +182,7 @@ describe("classifySubscription", () => {
       { channel: "C_SUB", user: "U1", text: "<@BOT1> more", ts: "169.5", thread_ts: "169.1" },
       ctx({ hasThreadSession: () => true }),
     );
-    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "more" });
+    expect(r).toEqual({ kind: "sub-continue", channelId: "C_SUB", threadTs: "169.1", userId: "U1", text: "more", ts: "169.5" });
   });
 
   it("respects allowedUserIds for a mid-thread mention", () => {
@@ -229,6 +229,82 @@ describe("classifySubscription", () => {
     const r = classifySubscription({ channel: "C_SUB", user: "U1", text: "<@BOT1> go", ts: "169.1" }, ctx());
     expect(r.kind).toBe("sub-start");
     expect((r as { midThread?: boolean }).midThread).toBeUndefined();
+  });
+
+  it("skips an owned-thread human reply that mentions someone else without mentioning the bot", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@U2> can you check this?", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("processes an owned-thread reply that mentions the bot AND someone else", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@BOT1> and <@U2> look at this", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("sub-continue");
+  });
+
+  it("skips an owned-thread reply that only carries a broadcast mention", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<!here> anyone around?", ts: "169.2", thread_ts: "169.1" },
+      ctx({ hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("ignore");
+  });
+
+  it("does not re-gate a whitelisted bot in an owned thread (its own gate already passed)", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", text: "<@BOT1> build finished", ts: "169.2", thread_ts: "169.1", bot_id: "B_OK", subtype: "bot_message" },
+      ctx({ allowedBotIds: ["B_OK"], hasThreadSession: () => true }),
+    );
+    expect(r.kind).toBe("sub-continue");
+  });
+
+  it("does not gate a TOP-LEVEL message that mentions someone else in 'all' mode", () => {
+    const r = classifySubscription(
+      { channel: "C_SUB", user: "U1", text: "<@U2> fyi", ts: "169.9" },
+      ctx({ subscribedChannels: [{ channelId: "C_SUB", trigger: "all" }] }),
+    );
+    expect(r.kind).toBe("sub-start");
+  });
+});
+
+describe("mentionsOthers", () => {
+  it("detects a mention of another user", () => {
+    expect(mentionsOthers("<@U2> can you check?", "BOT1")).toBe(true);
+  });
+
+  it("detects labeled and enterprise-style mentions", () => {
+    expect(mentionsOthers("<@U2|alice> please", "BOT1")).toBe(true);
+    expect(mentionsOthers("<@W2ENT> please", "BOT1")).toBe(true);
+  });
+
+  it("does not count the bot's own mention (bare or labeled)", () => {
+    expect(mentionsOthers("<@BOT1> do it", "BOT1")).toBe(false);
+    expect(mentionsOthers("<@BOT1|openacp> do it", "BOT1")).toBe(false);
+  });
+
+  it("returns true when the bot AND someone else are mentioned", () => {
+    expect(mentionsOthers("<@BOT1> and <@U2> look", "BOT1")).toBe(true);
+  });
+
+  it("detects broadcast mentions (bare and labeled)", () => {
+    expect(mentionsOthers("<!here> anyone?", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!here|here> anyone?", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!channel> heads up", "BOT1")).toBe(true);
+    expect(mentionsOthers("<!everyone> hi", "BOT1")).toBe(true);
+  });
+
+  it("detects user-group mentions", () => {
+    expect(mentionsOthers("<!subteam^S123ABC|@oncall> ping", "BOT1")).toBe(true);
+  });
+
+  it("returns false for plain text and non-mention markup", () => {
+    expect(mentionsOthers("just words", "BOT1")).toBe(false);
+    expect(mentionsOthers("a link <https://x.y|label>", "BOT1")).toBe(false);
   });
 });
 
@@ -279,5 +355,17 @@ describe("resolveThreadSession", () => {
     expect(d.patchRecord).toHaveBeenCalledWith("sess-new", {
       platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1" },
     });
+  });
+
+  it("restores lastDeliveredTs from a persisted record so gap backfill survives restarts", async () => {
+    const d = deps();
+    d.getSessionByThread = vi.fn().mockReturnValue(undefined);
+    d.getRecordByThread = vi.fn().mockReturnValue({
+      sessionId: "sess-old",
+      platform: { channelId: "C_SUB", topicId: "C_SUB:169.1", threadTs: "169.1", lastDeliveredTs: "169.7" },
+    });
+    const { sessionId, meta } = await resolveThreadSession(d, "C_SUB", "169.1");
+    expect(sessionId).toBe("sess-old");
+    expect(meta.lastDeliveredTs).toBe("169.7");
   });
 });

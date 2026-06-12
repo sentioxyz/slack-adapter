@@ -13,7 +13,9 @@ export type SlackMethod =
   | "conversations.unarchive"
   | "conversations.info"
   | "conversations.open"
-  | "conversations.replies";
+  | "conversations.replies"
+  | "reactions.add"
+  | "reactions.remove";
 
 // Requests per minute per method (Slack Tier definitions)
 const METHOD_RPM: Record<SlackMethod, number> = {
@@ -29,6 +31,8 @@ const METHOD_RPM: Record<SlackMethod, number> = {
   "conversations.info":      50, // Tier 3
   "conversations.open":      50, // Tier 3
   "conversations.replies":   50, // Tier 3
+  "reactions.add":           50, // Tier 3
+  "reactions.remove":        50, // Tier 3
 };
 
 export interface ISlackSendQueue {
