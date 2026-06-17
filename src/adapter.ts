@@ -43,6 +43,7 @@ import { collectAttachments } from "./attachment-collector.js";
 import { isSlackFileUrl } from "./utils.js";
 import type { ForwardedMessage } from "./types.js";
 import { enqueueWithMarkdownFallback } from "./markdown-post.js";
+import { decideIdleAction, endIdleSession } from "./idle-reaper.js";
 
 /** Compact "1.2k", "3.4M" formatter for token / context counts. Exported for tests. */
 export function formatTokens(n: number): string {
@@ -480,11 +481,21 @@ interface CoreKernel {
       currentModel?: string;
       dangerousMode?: boolean;
       permissionGate: { requestId: string; resolve(optionId: string): void };
+      /** Lifecycle status; terminal states (finished/cancelled/error) are not reaped. */
+      status?: string;
+      /** True while a prompt is actively being processed by the agent. */
+      promptRunning?: boolean;
+      /** Number of prompts waiting in the queue. */
+      queueDepth?: number;
+      /** Transition the session to `finished` (resumable). Used by idle reaping. */
+      finish?(reason?: string): void;
     } | undefined;
     getSessionByThread(platform: string, threadId: string): { id: string } | undefined;
     getRecordByThread(platform: string, threadId: string): { sessionId: string } | undefined;
     getSessionRecord(id: string): { platform?: Record<string, unknown> } | undefined;
     patchRecord(id: string, patch: Record<string, unknown>): Promise<void>;
+    /** Abort, destroy, and evict a session from the live map (used by idle reaping). */
+    cancelSession(id: string): Promise<void>;
   };
   fileService: FileServiceInterface;
   handleMessage(msg: { channelId: string; threadId: string; userId: string; text: string; attachments?: Attachment[] }): Promise<void>;
@@ -568,6 +579,12 @@ export class SlackAdapter extends MessagingAdapter {
   private fileProxy?: SlackFileProxy;
   /** file ids already surfaced to the agent, keyed by session channel slug */
   private surfacedFiles = new Map<string, Set<string>>();
+  /** sessionId → idle-reap timer. Re-armed on Slack activity, cleared on session end. */
+  private idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Idle-reap timeout in ms (0 = disabled), resolved from config in the constructor. */
+  private idleTimeoutMs = 0;
+  /** session:updated handler — clears idle timers when a session reaches a terminal state. */
+  private _sessionUpdatedHandler?: (payload: { sessionId: string; status?: string }) => void;
 
   constructor(
     core: CoreKernel,
@@ -583,6 +600,9 @@ export class SlackAdapter extends MessagingAdapter {
     this.log = logger ?? { info() {}, warn() {}, error() {}, debug() {} };
     this.slackConfig = config;
     this.settingsAPI = settingsAPI;
+    // Config reaches the adapter raw (not schema-parsed), so default explicitly.
+    const idleMinutes = config.sessionIdleTimeoutMinutes ?? 120;
+    this.idleTimeoutMs = idleMinutes > 0 ? idleMinutes * 60_000 : 0;
     this.formatter = new SlackFormatter();
     (this as { renderer: IRenderer }).renderer = new SlackRenderer(this.formatter);
   }
@@ -933,11 +953,22 @@ export class SlackAdapter extends MessagingAdapter {
     this.core.eventBus?.on("prompt:waiting", this._promptWaitingHandler);
 
     this._messageProcessingHandler = (data) => {
+      // Inbound activity — push the idle deadline out for this session.
+      this.resetIdleTimer(data.sessionId);
       this.dismissWaitingNotice(data.sessionId).catch((err) =>
         this.log.warn({ err, sessionId: data.sessionId }, "Failed to dismiss waiting notice"),
       );
     };
     this.core.eventBus?.on("message:processing", this._messageProcessingHandler);
+
+    // Stop tracking idle for a session once it reaches a terminal state —
+    // whether reaped here, ended by the agent, or cancelled by the user.
+    this._sessionUpdatedHandler = ({ sessionId, status }) => {
+      if (status && status !== "active" && status !== "initializing") {
+        this.clearIdleTimer(sessionId);
+      }
+    };
+    this.core.eventBus?.on("session:updated", this._sessionUpdatedHandler);
 
     // Start Bolt (Socket Mode)
     await this.app.start();
@@ -1085,6 +1116,13 @@ export class SlackAdapter extends MessagingAdapter {
       this.core.eventBus?.off("message:processing", this._messageProcessingHandler);
       this._messageProcessingHandler = undefined;
     }
+    if (this._sessionUpdatedHandler) {
+      this.core.eventBus?.off("session:updated", this._sessionUpdatedHandler);
+      this._sessionUpdatedHandler = undefined;
+    }
+    // Cancel all pending idle-reap timers
+    for (const timer of this.idleTimers.values()) clearTimeout(timer);
+    this.idleTimers.clear();
     // Cleanup all activity trackers
     for (const [sessionId, tracker] of this.sessionTrackers) {
       try {
@@ -1324,6 +1362,56 @@ export class SlackAdapter extends MessagingAdapter {
 
   private getSessionMeta(sessionId: string): SlackSessionMeta | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * (Re)arm the idle-reap timer for a session. Called on every inbound and
+   * outbound Slack message, so any conversation activity pushes the deadline
+   * out. When the timer fires after `idleTimeoutMs` of silence, the session is
+   * ended (see {@link onIdleTimeout}) to release its concurrency slot. A later
+   * human reply transparently resumes the finished session. No-op when idle
+   * reaping is disabled (timeout 0) or the sessionId is unknown.
+   */
+  private resetIdleTimer(sessionId: string): void {
+    if (this.idleTimeoutMs <= 0 || !sessionId) return;
+    this.clearIdleTimer(sessionId);
+    const timer = setTimeout(() => {
+      void this.onIdleTimeout(sessionId);
+    }, this.idleTimeoutMs);
+    // A pending idle timer must not keep the process alive on shutdown.
+    timer.unref?.();
+    this.idleTimers.set(sessionId, timer);
+  }
+
+  private clearIdleTimer(sessionId: string): void {
+    const timer = this.idleTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.idleTimers.delete(sessionId);
+    }
+  }
+
+  /**
+   * Idle timer fired. End the session only if it is genuinely idle: a session
+   * still processing a prompt (or with queued prompts) is rescheduled, never
+   * killed mid-turn; an already-terminal or vanished session just drops its
+   * timer. The reap itself ends the session as `finished` so it stays resumable.
+   */
+  private async onIdleTimeout(sessionId: string): Promise<void> {
+    this.idleTimers.delete(sessionId);
+    const action = decideIdleAction(this.core.sessionManager.getSession(sessionId));
+    if (action === "skip") return;
+    if (action === "reschedule") {
+      this.resetIdleTimer(sessionId);
+      return;
+    }
+    const minutes = Math.round(this.idleTimeoutMs / 60_000);
+    this.log.info({ sessionId, idleMinutes: minutes }, "Ending idle Slack session — no activity within timeout");
+    try {
+      await endIdleSession(this.core.sessionManager, sessionId, `idle: no Slack activity for ${minutes}m`);
+    } catch (err) {
+      this.log.warn({ err, sessionId }, "Failed to end idle session");
+    }
   }
 
   /** Spread into chat.postMessage params to thread output for subscription sessions. */
@@ -1604,6 +1692,8 @@ export class SlackAdapter extends MessagingAdapter {
 
   async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
     this.getTracer(sessionId)?.log("slack", { action: "dispatch:enter", sessionId, type: content.type });
+    // Outbound activity — push the idle deadline out for this session.
+    this.resetIdleTimer(sessionId);
     if (!this.sessions.has(sessionId)) {
       // On restart, this.sessions is cleared. Lazy resume does not call
       // createSessionThread(), so we self-heal by restoring from the persisted record.
