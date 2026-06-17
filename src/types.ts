@@ -75,6 +75,24 @@ export const SlackChannelConfigSchema = z.object({
    * `reactions:write` OAuth scope.
    */
   processingReaction: z.string().default("eyes"),
+  /**
+   * Minutes of Slack inactivity after which an idle session is automatically
+   * ended, freeing the concurrency slot it holds. The timer resets on every
+   * inbound and outbound message for the session; a session that is mid-turn
+   * (agent still working or prompts queued) is never reaped — the timer
+   * reschedules instead. The session is ended as `finished`, so a later human
+   * reply transparently resumes it with full history. Set to 0 to disable.
+   *
+   * Note: a session actively processing a prompt (or with queued prompts) is
+   * never reaped regardless of this value, so synchronous long work — a
+   * subagent, a foreground `docker build` — is safe at any duration. This
+   * timeout only bounds detached/background work that has already ended its
+   * turn and gone Slack-silent; lower it for chat-only bots that never run
+   * long detached jobs. Default 120 (2h) — generous, since the concurrency
+   * cap is the real safety valve and a finished-but-leaked session now self-
+   * heals within this window instead of lingering forever.
+   */
+  sessionIdleTimeoutMinutes: z.number().int().nonnegative().default(120),
 });
 
 export type SlackChannelConfig = z.infer<typeof SlackChannelConfigSchema>;
